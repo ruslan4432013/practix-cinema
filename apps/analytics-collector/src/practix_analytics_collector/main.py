@@ -21,7 +21,6 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
 
 from practix_analytics_collector.api.v1 import events, health
 from practix_analytics_collector.brokers.kafka import KafkaEventBroker
@@ -41,6 +40,8 @@ from practix_core.jwt import (
     install_exception_handler,
     make_jwt_settings,
 )
+from practix_core.openapi import install_bearer_security
+from practix_core.sentry import init_sentry
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -50,6 +51,18 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app: FastAPI):
     # Трассировка инициализируется в каждом воркере отдельно (свой процесс).
     init_tracer_provider()
+    # Сбор ошибок — там же, по одному фоновому потоку отправки на воркер.
+    # Инвариант «ingest никогда не отдаёт 5xx» не задет: SDK ставит событие в
+    # очередь и при недоступности приёмника молча его отбрасывает.
+    init_sentry(
+        enabled=settings.SENTRY_ENABLED,
+        dsn=settings.SENTRY_DSN,
+        service_name=settings.OTEL_SERVICE_NAME,
+        environment=settings.SENTRY_ENVIRONMENT,
+        release=settings.SENTRY_RELEASE,
+        sample_rate=settings.SENTRY_SAMPLE_RATE,
+        send_default_pii=settings.SENTRY_SEND_DEFAULT_PII,
+    )
 
     # Значения по умолчанию у секретов опасны тем, что работают: сервис
     # поднимается, ничего не ломается, и подмену забывают. В продакшене такой
@@ -163,24 +176,10 @@ app.include_router(events.router, prefix='/api/v1/events', tags=['События
 app.include_router(health.router, prefix='/health', tags=['Служебные'])
 app.include_router(health.metrics_router, tags=['Служебные'])
 
-
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    openapi_schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-    )
-    openapi_schema.setdefault('components', {})['securitySchemes'] = {
-        'Bearer': {'type': 'http', 'scheme': 'bearer', 'bearerFormat': 'JWT'},
-    }
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-
-app.openapi = custom_openapi
+# Схема Bearer в документе OpenAPI: без неё Swagger UI не даёт послать токен.
+# Тело переехало в practix_core.openapi — оно было побайтово одинаковым здесь и
+# в ugc-api, и это обязательный бойлерплейт, а не решение этого сервиса.
+install_bearer_security(app)
 
 
 def run() -> None:

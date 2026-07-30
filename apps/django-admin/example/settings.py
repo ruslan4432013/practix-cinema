@@ -152,3 +152,41 @@ AUTHENTICATION_BACKENDS = [
 AUTH_API_URL = env.AUTH_API_URL
 AUTH_API_TIMEOUT = env.AUTH_API_TIMEOUT
 AUTH_API_MAX_ATTEMPTS = env.AUTH_API_MAX_ATTEMPTS
+
+
+# --- Логирование ------------------------------------------------------------
+# Раньше LOGGING в проекте не было ВООБЩЕ: действовал дефолт Django, который при
+# DEBUG=False отправляет в консоль только django.server и записи уровня WARNING+
+# и не знает ни про JSON, ни про поле service. Админка была единственным
+# сервисом стенда, чьи строки в общем хранилище логов нельзя было ни
+# отфильтровать по сервису, ни разобрать на поля.
+#
+# Форматтер — свой (example/logging_json.py): проект вне uv-workspace и
+# practix_core импортировать не может. Набор и порядок ключей совпадают с
+# библиотечными намеренно — это один индекс и один набор полей в Kibana.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'json': {'()': 'example.logging_json.JsonFormatter', 'service': env.OTEL_SERVICE_NAME},
+        'verbose': {'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s'},
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            # 'ext://sys.stdout', а не sys.stdout: dictConfig разрешает такие
+            # ссылки сам, и settings.py остаётся без импорта sys.
+            'stream': 'ext://sys.stdout',
+            'formatter': 'json' if env.LOG_JSON else 'verbose',
+        },
+    },
+    'root': {'handlers': ['console'], 'level': env.LOG_LEVEL},
+    'loggers': {
+        # django.request — источник записей о 4xx/5xx: без явного логгера
+        # исключение во вьюхе видно только по traceback'у uwsgi, то есть уже не
+        # как структурная запись.
+        'django': {'handlers': ['console'], 'level': env.LOG_LEVEL, 'propagate': False},
+        # django.db.backends на DEBUG печатает КАЖДЫЙ SQL-запрос.
+        'django.db.backends': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
+    },
+}

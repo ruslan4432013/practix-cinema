@@ -14,6 +14,7 @@ from practix_core.jwt import (
     install_exception_handler,
     make_jwt_settings,
 )
+from practix_core.sentry import init_sentry
 from practix_movies_api.api.v1 import films, genres, persons
 from practix_movies_api.core import config
 from practix_movies_api.core.logger import LOGGING
@@ -27,6 +28,17 @@ from practix_movies_api.services import auth_client
 async def lifespan(_app_instance: FastAPI):
     # Инициализируем трассировку на каждый воркер (в его собственном процессе).
     init_tracer_provider()
+    # Сбор ошибок — там же и по той же причине: у сервиса 8 воркеров, и у
+    # каждого свой процесс со своим фоновым потоком отправки.
+    init_sentry(
+        enabled=config.settings.sentry_enabled,
+        dsn=config.settings.sentry_dsn,
+        service_name=config.settings.otel_service_name,
+        environment=config.settings.sentry_environment,
+        release=config.settings.sentry_release,
+        sample_rate=config.settings.sentry_sample_rate,
+        send_default_pii=config.settings.sentry_send_default_pii,
+    )
     # Подключаемся к базам при старте сервера
     # Подключиться можем при работающем event-loop
     # Поэтому логика подключения происходит в асинхронной функции

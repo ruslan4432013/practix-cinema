@@ -12,7 +12,7 @@
     "lint": {},
     "test": {
       "options": {
-        "command": "uv run --no-project --python 3.13 --with pytest --with-editable libs/search-schema pytest libs/search-schema/tests -v"
+        "command": "uv run --no-project --with pytest --with-editable libs/search-schema pytest libs/search-schema/tests -v"
       }
     },
     "typecheck": {

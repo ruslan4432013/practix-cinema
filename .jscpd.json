@@ -7,7 +7,8 @@
     "**/__pycache__/**",
     "**/.nx/**",
     "**/dist/**",
-    "apps/auth/migrations/versions/**",
+    "apps/*/migrations/versions/**",
+    "apps/*/migrations/env.py",
     "apps/django-admin/*/migrations/**",
     "sqlite_to_postgres/**",
     "schema_design/**"
@@ -21,5 +22,5 @@
   "output": ".jscpd",
   "absolute": false,
   "gitignore": false,
-  "threshold": 1.5
+  "threshold": 1.0
 }

@@ -52,6 +52,9 @@ services:
       # Трассировка выключена: Jaeger в тестовом стеке нет, а экспортёр иначе
       # засоряет вывод повторами неудачных отправок спанов.
       - OTEL_ENABLED=False
+      # Сбор ошибок выключен по той же причине: приёмника в тестовом
+      # стеке нет. Код-дефолт и так False, но явное лучше подразумеваемого.
+      - SENTRY_ENABLED=False
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -82,6 +85,9 @@ services:
       # Трассировка выключена: Jaeger в тестовом стеке нет, а экспортёр иначе
       # засоряет вывод повторами неудачных отправок спанов.
       - OTEL_ENABLED=False
+      # Сбор ошибок выключен по той же причине: приёмника в тестовом
+      # стеке нет. Код-дефолт и так False, но явное лучше подразумеваемого.
+      - SENTRY_ENABLED=False
     depends_on:
       fastapi:
         condition: service_healthy
@@ -130,6 +136,9 @@ services:
       # Трассировка выключена: Jaeger в тестовом стеке нет, а экспортёр иначе
       # засоряет вывод повторами неудачных отправок спанов.
       - OTEL_ENABLED=False
+      # Сбор ошибок выключен по той же причине: приёмника в тестовом
+      # стеке нет. Код-дефолт и так False, но явное лучше подразумеваемого.
+      - SENTRY_ENABLED=False
     depends_on:
       auth-db:
         condition: service_healthy
@@ -151,6 +160,55 @@ services:
     # с корневым constraints.txt) — раньше здесь стоял `pip install` без
     # закрепления версий, то есть каждый прогон мог получить другой раннер.
     command: ["pytest", "/opt/app/apps/auth/tests/functional", "-v"]
+
+  ugc-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: ugc_database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ugc_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Имя `ugc-tests` уже занято набором коллектора (ниже в этом файле), поэтому
+  # набор сервиса пользовательского контента называется ugc-api-tests.
+  ugc-api-tests:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: ugc-api
+      args:
+        PACKAGE: practix-ugc-api
+        UV_GROUPS: --group test
+    image: practix/ugc-api:test
+    environment:
+      - PYTEST_ADDOPTS=-p no:cacheprovider
+      - UGC_API_POSTGRES_HOST=ugc-db
+      - UGC_API_POSTGRES_PORT=5432
+      - UGC_API_POSTGRES_USER=postgres
+      - UGC_API_POSTGRES_PASSWORD=secret
+      - UGC_API_POSTGRES_DB=ugc_database
+      # Денилист отозванных токенов сервис читает из Redis Auth-сервиса.
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Тот же секрет, которым practix_testing подписывает тестовые токены.
+      - AUTHJWT_SECRET_KEY=secret
+      - OTEL_ENABLED=False
+      # Сбор ошибок выключен по той же причине: приёмника в тестовом
+      # стеке нет. Код-дефолт и так False, но явное лучше подразумеваемого.
+      - SENTRY_ENABLED=False
+    depends_on:
+      ugc-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # ENTRYPOINT и working_dir не переопределяются — см. подробный комментарий у
+    # auth-tests: entrypoint.sh создаёт .env из .env.example, а pydantic-settings
+    # ищет .env относительно рабочего каталога образа.
+    command: ["pytest", "/opt/app/apps/ugc-api/tests/functional", "-v"]
 
   # Один брокер вместо трёх: тесты проверяют логику сервиса, а не
   # отказоустойчивость кластера, и лишние два узла только замедляют прогон.
@@ -221,6 +279,9 @@ services:
       # Трассировка выключена: Jaeger в тестовом стеке нет, а экспортёр иначе
       # засоряет вывод повторами неудачных отправок спанов.
       - OTEL_ENABLED=False
+      # Сбор ошибок выключен по той же причине: приёмника в тестовом
+      # стеке нет. Код-дефолт и так False, но явное лучше подразумеваемого.
+      - SENTRY_ENABLED=False
       # Метрики в тестах ведёт один процесс — multiprocess-режим не нужен.
       - PROMETHEUS_MULTIPROC_DIR=
     depends_on:
@@ -326,6 +387,9 @@ services:
       # Jaeger в тестовом стеке нет, а экспортёр иначе засоряет вывод
       # повторами неудачных отправок спанов (как в ugc-tests).
       - OTEL_ENABLED=False
+      # Сбор ошибок выключен по той же причине: приёмника в тестовом
+      # стеке нет. Код-дефолт и так False, но явное лучше подразумеваемого.
+      - SENTRY_ENABLED=False
       - LOG_JSON=False
     depends_on:
       kafka-init-test:

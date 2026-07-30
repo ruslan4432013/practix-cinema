@@ -166,17 +166,43 @@ def json_output_from_env(default: bool = True) -> bool:
     return raw.strip().lower() not in ('0', 'false', 'no')
 
 
-def build_logging_config_from_env(*, logger_levels: Mapping[str, str] | None = None) -> dict:
+def service_name_from_env(default: str) -> str:
+    """``OTEL_SERVICE_NAME`` из окружения.
+
+    Имя сервиса в этом репозитории каноническое: оно задаётся ОДИН раз, в
+    ``environment:`` сервиса в compose, и им подписываются трассировка, сбор
+    ошибок и — с появлением ELK — логи. Одинаковое имя во всех трёх системах и
+    есть то, что позволяет из ошибки перейти в трейс, а из трейса — в строки
+    лога; у ETL ClickHouse это однажды разъехалось, и в логах стояло имя из
+    ``PROJECT_NAME``, общего для всего стенда.
+
+    Читается из окружения по тому же правилу, что ``LOG_LEVEL``:
+    ``movies-api``/``auth`` вызывают ``setup_logging()`` на импорте настроек, и
+    обратный импорт замкнул бы цикл.
+    """
+    return os.environ.get('OTEL_SERVICE_NAME', default)
+
+
+def build_logging_config_from_env(
+    *,
+    static_fields: Mapping[str, str] | None = None,
+    logger_levels: Mapping[str, str] | None = None,
+) -> dict:
     """``build_logging_config``, читающий уровень и формат из окружения.
 
     Для ``rest`` и ``auth``: их ``core/config.py`` вызывает ``setup_logging()`` НА
     ИМПОРТЕ, поэтому логгер не имеет права импортировать настройки — иначе цикл.
     Обе пары строк, читавших окружение, были идентичны, и разъехаться они могли
     только в одну сторону: кто-то поправил бы разбор ``LOG_JSON`` в одном сервисе.
+
+    ``static_fields`` пробрасывается как есть — этим сервисы, лишённые доступа к
+    собственным настройкам, всё же подписывают записи именем сервиса (см.
+    ``service_name_from_env``).
     """
     return build_logging_config(
         level=level_from_env(),
         json_output=json_output_from_env(),
+        static_fields=static_fields,
         logger_levels=logger_levels,
     )
 

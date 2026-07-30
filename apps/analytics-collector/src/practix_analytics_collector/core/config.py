@@ -165,6 +165,17 @@ class Settings(BaseSettings):
     # JSON-логи удобны для сбора в ELK/Loki; в локальной разработке читаемее текст.
     LOG_JSON: bool = True
 
+    # --- Сбор ошибок (Sentry / GlitchTip) ---
+    # Выключено по умолчанию: без поднятого приёмника SDK молотил бы в пустоту.
+    # Инвариант «ingest никогда не отдаёт 5xx» это не задевает: SDK отправляет
+    # события фоновым потоком и при недоступности приёмника молча их отбрасывает.
+    SENTRY_ENABLED: bool = False
+    SENTRY_DSN: str = ''
+    SENTRY_ENVIRONMENT: str = 'dev'
+    SENTRY_RELEASE: str = ''
+    SENTRY_SAMPLE_RATE: float = 1.0
+    SENTRY_SEND_DEFAULT_PII: bool = False
+
     @field_validator('UGC_ENV')
     @classmethod
     def _normalize_env(cls, value: str) -> str:

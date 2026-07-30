@@ -9,7 +9,7 @@ from sqlite_to_postgres.shared_schemas import EntityWithDatabase
 
 @dataclasses.dataclass
 class FilmWorkPostgres(EntityWithDatabase):
-    __tablename__ = "film_work"
+    __tablename__ = 'film_work'
     id: UUID
     title: str
     description: str
@@ -35,7 +35,7 @@ class FilmWorkPostgres(EntityWithDatabase):
 
 @dataclasses.dataclass
 class GenrePostgres(EntityWithDatabase):
-    __tablename__ = "genre"
+    __tablename__ = 'genre'
     id: UUID
     name: str
     description: str | None
@@ -55,7 +55,7 @@ class GenrePostgres(EntityWithDatabase):
 
 @dataclasses.dataclass
 class GenreFilmWorkPostgres(EntityWithDatabase):
-    __tablename__ = "genre_film_work"
+    __tablename__ = 'genre_film_work'
     id: UUID
     film_work_id: UUID
     genre_id: UUID
@@ -77,7 +77,7 @@ class GenreFilmWorkPostgres(EntityWithDatabase):
 
 @dataclasses.dataclass
 class PersonPostgres(EntityWithDatabase):
-    __tablename__ = "person"
+    __tablename__ = 'person'
     id: UUID
     full_name: str
     created: datetime.datetime
@@ -96,7 +96,7 @@ class PersonPostgres(EntityWithDatabase):
 
 @dataclasses.dataclass
 class PersonFilmWorkPostgres(EntityWithDatabase):
-    __tablename__ = "person_film_work"
+    __tablename__ = 'person_film_work'
     id: UUID
     film_work_id: UUID
     person_id: UUID

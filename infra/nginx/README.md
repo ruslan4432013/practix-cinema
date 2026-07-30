@@ -26,12 +26,45 @@ proxy_set_header X-Request-Id $request_id;
 ```
 
 Nginx генерирует `$request_id` и **перезаписывает** любой присланный клиентом
-`X-Request-Id` (защита от подмены). Значение также попадает в лог
-(`rid=$request_id` в `log_format main`). Приложения (auth / api / django) требуют
+`X-Request-Id` (защита от подмены). Значение попадает и в access-лог — полем
+`request_id` формата `json_access` (см. ниже), под тем же именем, что и в логах
+приложений: один запрос в Kibana находит и строку nginx, и строки сервисов.
+Приложения (auth / api / django) требуют
 этот заголовок, проставляют его в OpenTelemetry-span, возвращают в ответе и
 пробрасывают в исходящих межсервисных вызовах — так один запрос прослеживается
 сквозь все сервисы в Jaeger. Коллектор — исключение: он генерирует идентификатор
 сам, потому что `navigator.sendBeacon` не умеет ставить произвольные заголовки.
+
+## Access-лог в JSON (`log_format json_access`)
+
+Access-лог пишется в `/dev/stdout` одной строкой JSON. Его читает Filebeat и
+разбирает Logstash (`infra/elk/`), поэтому формат согласован с логами
+Python-сервисов: `timestamp`, `level`, `logger`, `message`, `service`,
+`request_id` — плюс поля самого nginx.
+
+| Группа | Поля |
+|---|---|
+| Общие с приложениями | `timestamp` (`$time_iso8601`), `level` (всегда `INFO`), `logger` (`nginx.access`), `service` (`nginx`), `message` (`$request`), `request_id` |
+| Клиент | `remote_addr`, `remote_user`, `http_referer`, `http_user_agent`, `http_x_forwarded_for`, `scheme`, `protocol` |
+| Запрос | `method`, `uri`, `args`, `request_length` |
+| Ответ | `status`, `body_bytes_sent`, `request_time` |
+| Апстрим | `upstream_addr`, `upstream_status`, `upstream_response_time`, `upstream_connect_time` |
+
+Две вещи в этом формате сделаны намеренно и ломаются, если их «поправить»:
+
+* **`escape=json` обязателен.** Без него кавычка или обратный слэш в
+  `User-Agent`, `Referer` или URL рвёт JSON, и запись уезжает в
+  `_jsonparsefailure`. Именно этими полями управляет клиент — то есть сломать
+  лог можно намеренно.
+* **Числа закавычены.** `$status` при обрыве соединения равен `000`, а `000` —
+  невалидный литерал JSON (ведущие нули); `$upstream_response_time` бывает
+  пустым и списком вида `0.001, 0.002`. Типы приводит Logstash уже после
+  разбора (`infra/elk/logstash/pipeline/logs.conf`), и там же живёт список
+  полей, которые становятся числами.
+
+`error_log` не настраивается: официальный образ симлинкует его в `/dev/stderr`,
+и строки попадают в тот же сборщик — Logstash помечает их уровнем `WARNING`, раз
+у них нет нашего формата.
 
 ## Маршрутизация (`configs/site.conf`)
 
@@ -43,6 +76,9 @@ Nginx генерирует `$request_id` и **перезаписывает** л�
 | `^~ /api/v1/{auth,roles,users}` | `auth_upstream` | сервис авторизации (10s read / 5s connect) |
 | `^~ /api/v1/events` | `analytics_upstream` | ingest, лимит `ugc_ingest` (50 r/s, burst 100), preflight на Nginx |
 | `^~ /api/analytics` | `analytics_upstream` | документация коллектора |
+| `^~ /api/v1/{likes,bookmarks,reviews}` | `ugc_upstream` | запись UGC, лимит `ugc_write` (20 r/s, burst 40) |
+| `^~ /api/v1/ratings` | `ugc_upstream` | чтение рейтинга фильма, без лимита записи |
+| `^~ /api/ugc` | `ugc_upstream` | документация сервиса UGC |
 | `/api` | `api_upstream` | Movies API (перехватчик остального `/api`) |
 | `^~ /health`, `= /metrics` | — | `404`: пробы и метрики снимаются внутри сети |
 | `/` | `django_upstream` | всё остальное |
@@ -64,6 +100,7 @@ Nginx генерирует `$request_id` и **перезаписывает** л�
 
 | Зона | Область | Лимит | Зачем |
 |------|---------|-------|-------|
+| `ugc_write` | `/api/v1/{likes,bookmarks,reviews}` | 20 r/s, burst 40 | Единственный лимит без прикладного дубля: ugc-api намеренно не содержит своего лимитера. Порог ниже, чем у ingest: каждый запрос берёт блокировку и пишет в PostgreSQL |
 | `ugc_ingest` | `/api/v1/events` | 50 r/s, burst 100 | Грубый флуд отсекается до Python; точный учёт (включая вес пачки событий) ведёт сам сервис |
 | `auth_login` | `login`, `register`, `refresh` | 1 r/s, burst 5–10 | Брутфорс пароля не должен доходить до Python и Redis: проверка идёт через argon2 — намеренно дорогую функцию |
 | `perip` (`limit_conn`) | весь сервер | 100 соединений с адреса | `limit_req` ограничивает частоту, но не число одновременных соединений — медленные соединения (slowloris) им не отсекаются |
@@ -117,7 +154,7 @@ Preflight (`OPTIONS`) на `/api/v1/events` отвечается прямо в N
 2. Скопируйте конфигурацию:
    - `nginx.conf` → `/etc/nginx/nginx.conf`
    - `configs/site.conf` → `/etc/nginx/conf.d/site.conf`
-3. Убедитесь, что сервисы `api`, `auth`, `django-admin` и `analytics-collector`
+3. Убедитесь, что сервисы `api`, `auth`, `django-admin`, `ugc-api` и `analytics-collector`
    доступны по именам хостов из `upstream`-блоков.
 4. Перезапустите Nginx.
 

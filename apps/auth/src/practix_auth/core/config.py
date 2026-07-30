@@ -63,6 +63,18 @@ class Settings(BaseSettings):
     OTEL_SERVICE_NAME: str = 'auth-service'
     OTEL_EXPORTER_OTLP_ENDPOINT: str = 'http://jaeger:4318'
 
+    # --- Сбор ошибок (Sentry / GlitchTip) ---
+    # Выключено по умолчанию: без поднятого приёмника SDK молотил бы в пустоту.
+    # Особенность именно этого сервиса — чувствительные локальные переменные в
+    # кадрах стека (пароль внутри логина), поэтому вырезание ключей в
+    # practix_core.sentry.EXTRA_DENYLIST для Auth не косметика.
+    SENTRY_ENABLED: bool = False
+    SENTRY_DSN: str = ''
+    SENTRY_ENVIRONMENT: str = 'dev'
+    SENTRY_RELEASE: str = ''
+    SENTRY_SAMPLE_RATE: float = 1.0
+    SENTRY_SEND_DEFAULT_PII: bool = False
+
     @property
     def trusted_proxy_networks(self) -> list[Network]:
         """Сети, из которых принимаются заголовки с адресом клиента.

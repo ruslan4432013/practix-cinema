@@ -13,6 +13,7 @@ from practix_core.jwt import (
     install_exception_handler,
     make_jwt_settings,
 )
+from practix_core.sentry import init_sentry
 
 # Сервис запускается через `uvicorn src.main:app`, то есть без --log-config.
 # Настраиваем логирование при импорте приложения: dictConfig выполняется после
@@ -24,6 +25,18 @@ app = FastAPI(
     description='API для управления пользователями, ролями и сессиями.',
     docs_url='/api/openapi',
     openapi_url='/api/openapi.json',
+)
+
+# Сбор ошибок поднимается до middleware: исключение, брошенное при сборке
+# приложения, тоже должно попасть в приёмник.
+init_sentry(
+    enabled=settings.SENTRY_ENABLED,
+    dsn=settings.SENTRY_DSN,
+    service_name=settings.OTEL_SERVICE_NAME,
+    environment=settings.SENTRY_ENVIRONMENT,
+    release=settings.SENTRY_RELEASE,
+    sample_rate=settings.SENTRY_SAMPLE_RATE,
+    send_default_pii=settings.SENTRY_SEND_DEFAULT_PII,
 )
 
 # Трассировка: сначала наш middleware (внутренний), затем инструментация OTel

@@ -111,5 +111,6 @@
         "cwd": "{workspaceRoot}"
       }
     }
-  }
+  },
+  "analytics": true
 }

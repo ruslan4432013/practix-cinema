@@ -30,6 +30,7 @@ EXPECTED: dict[str, set[str]] = {
     'auth': {'platform-core', 'testing'},
     'analytics-collector': {'platform-core', 'analytics-contracts', 'testing'},
     'etl-clickhouse': {'platform-core', 'analytics-contracts', 'testing'},
+    'ugc-api': {'platform-core', 'testing'},
     'etl-elasticsearch': {'platform-core', 'search-schema'},
     'analytics-contracts': set(),
     'platform-core': set(),
@@ -37,6 +38,10 @@ EXPECTED: dict[str, set[str]] = {
     'testing': {'platform-core', 'search-schema'},
     # django-admin вне workspace (Python 3.12, свой lock) — рёбер нет и быть не должно.
     'django-admin': set(),
+    # tools — проверки для CI: не пакет и не член workspace, объявлен project.json
+    # ради целей lint/test. Рёбер нет: на библиотеки репозитория скрипты не
+    # опираются (единственная внешняя зависимость — aiohttp в уведомлении).
+    'tools': set(),
 }
 
 

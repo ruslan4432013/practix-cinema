@@ -21,6 +21,18 @@ repos:
         language: system
         types_or: [python, pyi]
         require_serial: true
+      # mypy запускается ПО КОРНЕВОМУ КОНФИГУ, без списка файлов
+      # (pass_filenames: false): в конфиге задан набор `files = [...]` — только
+      # libs/, — и передача сюда изменённых путей проверяла бы приложения, где
+      # типы пока красные. Тот же шаг есть в CI: конфиг, который нигде не
+      # запускается, уже однажды набрал под собой 10 ошибок.
+      - id: mypy
+        name: mypy (типы, libs/)
+        entry: uv run mypy
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

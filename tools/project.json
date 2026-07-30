@@ -1,0 +1,19 @@
+{
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "name": "tools",
+  "projectType": "library",
+  "sourceRoot": "tools",
+  "tags": [
+    "lang:python",
+    "scope:repo",
+    "type:tooling"
+  ],
+  "targets": {
+    "lint": {},
+    "test": {
+      "options": {
+        "command": "uv run pytest tools/tests -q"
+      }
+    }
+  }
+}

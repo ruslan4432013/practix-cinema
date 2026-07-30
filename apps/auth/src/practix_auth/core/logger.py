@@ -12,10 +12,16 @@
 замкнула бы цикл.
 """
 
-from practix_core.logging import build_logging_config_from_env
+from practix_core.logging import build_logging_config_from_env, service_name_from_env
 from practix_core.logging import setup_logging as _setup_logging
 
 LOGGING = build_logging_config_from_env(
+    # Имя сервиса в каждой записи: в общем хранилище логов строки иначе
+    # отличаются только именем контейнера, которого в самой строке нет.
+    # Значение по умолчанию — 'auth-service', как в OTEL_SERVICE_NAME: логи и
+    # Jaeger обязаны называть сервис одинаково, иначе переход из трейса в логи
+    # требует помнить, что это одно и то же.
+    static_fields={'service': service_name_from_env('auth-service')},
     logger_levels={
         # None — тот же уровень, что у root (из LOG_LEVEL).
         'uvicorn': None,

@@ -44,16 +44,17 @@ x-clickhouse-keeper: &clickhouse-keeper
   networks:
     - movies_net
 
-# ПРОФИЛИ. Без них `docker compose up` поднимал все 29 сервисов, и стенду
-# требовалось ≥12 ГБ памяти Docker — даже когда правишь только Movies API.
+# ПРОФИЛИ. Без них `docker compose up` поднимал бы все 41 сервис, и стенду
+# требовалось бы ≥16 ГБ памяти Docker — даже когда правишь только Movies API.
 #
-#   docker compose up -d                            # ядро (~19 сервисов)
-#   docker compose --profile warehouse up -d         # + ClickHouse, Keeper, ETL ClickHouse
-#   docker compose --profile observability up -d     # + Prometheus, Grafana, Kafka UI
-#   docker compose --profile warehouse --profile observability up -d   # всё
+#   docker compose up -d                             # ядро (21 сервис)
+#   docker compose --profile warehouse up -d         # 30: + ClickHouse, Keeper, ETL ClickHouse
+#   docker compose --profile observability up -d     # 27: + Prometheus, Grafana, Kafka UI, GlitchTip
+#   docker compose --profile logging up -d           # 26: + Elasticsearch(логи), Logstash, Kibana, Filebeat
+#   docker compose --profile warehouse --profile observability --profile logging up -d   # всё (41)
 #
 # В профиль вынесено самое тяжёлое: 4 узла ClickHouse + 3 Keeper — это и есть
-# основная часть тех ≥12 ГБ.
+# основная часть тех ≥12 ГБ, а ELK добавляет к ним ещё около 2 ГБ.
 #
 # ЧЕГО В ПРОФИЛЯХ НЕТ И ПОЧЕМУ. Коллектор, redis-ugc и брокеры Kafka остались в
 # ядре, хотя относятся к аналитике: Nginx резолвит имена апстримов ПРИ СТАРТЕ и
@@ -476,6 +477,261 @@ services:
     networks:
       - movies_net
 
+  # --- Сбор ошибок: GlitchTip ----------------------------------------------
+  #
+  # ПОЧЕМУ НЕ SENTRY. Официальная self-hosted сборка Sentry — это 16 ГБ RAM плюс
+  # 16 ГБ swap, 4 ядра, 20 ГБ диска и ~40 контейнеров: Kafka, ClickHouse, Snuba,
+  # Relay, Symbolicator, PgBouncer, memcached. Стенд уже просит ≥12 ГБ на
+  # профиле warehouse, и вместе они на одной машине не живут.
+  #
+  # GlitchTip реализует ТОТ ЖЕ протокол приёма событий и работает с ОФИЦИАЛЬНЫМ
+  # sentry-sdk без единой правки в коде — отличается только DSN. Цена: три
+  # контейнера и ~512 МБ. Переезд на sentry.io или на настоящий Sentry — это
+  # замена SENTRY_DSN в .env, приложения этого не заметят.
+  #
+  # GlitchTip НЕ добавляется в upstream nginx намеренно: nginx резолвит апстримы
+  # при старте и падает, если сервиса нет в сети (см. шапку файла), а этот сервис
+  # по умолчанию выключен профилем. Доступ — по опубликованному порту.
+  glitchtip-db:
+    profiles: ["observability"]
+    image: postgres:16
+    container_name: glitchtip-db
+    environment:
+      POSTGRES_USER: ${GLITCHTIP_POSTGRES_USER:-glitchtip}
+      POSTGRES_PASSWORD: ${GLITCHTIP_POSTGRES_PASSWORD:-glitchtip}
+      POSTGRES_DB: ${GLITCHTIP_POSTGRES_DB:-glitchtip}
+    volumes:
+      - glitchtip_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${GLITCHTIP_POSTGRES_USER:-glitchtip} -d ${GLITCHTIP_POSTGRES_DB:-glitchtip}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - movies_net
+
+  # Отдельный экземпляр, а не общий redis: тот держит сессии Auth под
+  # volatile-lru, и очередь задач GlitchTip вытесняла бы их под давлением.
+  # Правило стенда «разные экземпляры — разная судьба при отказе».
+  glitchtip-valkey:
+    profiles: ["observability"]
+    image: valkey/valkey:9-alpine
+    container_name: glitchtip-valkey
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - movies_net
+
+  glitchtip:
+    profiles: ["observability"]
+    image: glitchtip/glitchtip:6
+    container_name: glitchtip
+    depends_on:
+      glitchtip-db:
+        condition: service_healthy
+      glitchtip-valkey:
+        condition: service_healthy
+    environment:
+      # all_in_one поднимает web, worker и beat в одном процессе. Отдельный
+      # контейнер воркера нужен под нагрузкой, которой у стенда нет.
+      SERVER_ROLE: all_in_one
+      DATABASE_URL: postgres://${GLITCHTIP_POSTGRES_USER:-glitchtip}:${GLITCHTIP_POSTGRES_PASSWORD:-glitchtip}@glitchtip-db:5432/${GLITCHTIP_POSTGRES_DB:-glitchtip}
+      VALKEY_URL: redis://glitchtip-valkey:6379
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:-change_me_to_something_random}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-http://localhost:8001}
+      ENABLE_OPEN_USER_REGISTRATION: ${GLITCHTIP_ENABLE_OPEN_USER_REGISTRATION:-true}
+      EMAIL_URL: ${GLITCHTIP_EMAIL_URL:-consolemail://}
+      DEFAULT_FROM_EMAIL: ${GLITCHTIP_DEFAULT_FROM_EMAIL:-glitchtip@example.com}
+    ports:
+      - "${GLITCHTIP_HOST_PORT:-8001}:8000"
+    volumes:
+      - glitchtip_uploads:/code/uploads
+    networks:
+      - movies_net
+
+  # --- Логи: ELK (профиль logging) ------------------------------------------
+  #
+  # ОТДЕЛЬНЫЙ Elasticsearch, а не соседний индекс в существующем. Причина не в
+  # объёме: у поискового индекса каталога и у потока логов разная судьба при
+  # аварии. Лог растёт непрерывно, и первый же день без ротации упирается в
+  # диск — вместе с ним встал бы поиск фильмов, то есть отказ ИНСТРУМЕНТА
+  # наблюдения уронил бы НАБЛЮДАЕМОЕ. Отдельный узел делает эту связь
+  # невозможной по построению — то же правило, по которому redis-ugc отделён от
+  # redis, а ugc-db от theatre-db.
+  #
+  # ДОСТАВКА: json-file -> Filebeat -> Logstash -> ES. Драйвер gelf не
+  # используется намеренно: он шлёт по UDP без подтверждения, и перезапуск
+  # Logstash теряет логи молча; кроме того, при не-json-file драйвере перестаёт
+  # работать `docker compose logs`, которым стенд пользуются каждый день.
+  # Приложения ничего не знают о получателе логов и просто пишут в stdout.
+  #
+  # НИ ОДИН сервис ядра не получает depends_on на logstash — намеренно:
+  # конвейер логов не имеет права блокировать приложение. При выключенном
+  # профиле сервисы пишут в stdout как обычно, а Filebeat дочитает файлы, когда
+  # его поднимут.
+  elasticsearch-logs:
+    profiles: ["logging"]
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.4.1
+    container_name: elasticsearch-logs
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      # Имя кластера отличается от соседнего узла намеренно: два single-node
+      # кластера в одной сети с ОДИНАКОВЫМ именем — заготовка для путаницы в
+      # диагностике («смотрю health не того узла»).
+      - cluster.name=practix-logs
+      - ES_JAVA_OPTS=${ES_LOGS_JAVA_OPTS:--Xms512m -Xmx512m}
+    ports:
+      # 9200 занят поисковым узлом, а 9201 у разработчика часто занят им же
+      # (ELASTIC_HOST_PORT), поэтому по умолчанию 9210 — по той же причине, по
+      # которой native-порты ClickHouse съехали на 9010.
+      - "${ELASTIC_LOGS_HOST_PORT:-9210}:9200"
+    volumes:
+      - es_logs_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - movies_net
+
+  # Шаблон индекса ОБЯЗАН примениться до первой записи: без него тип поля
+  # закрепляет тот, кто записал первым. На живом стенде первым про `status`
+  # написал Jaeger — строкой, — и диапазонные запросы по коду ответа nginx
+  # перестали работать молча. Одноразовый контейнер по образцу kafka-init.
+  elasticsearch-logs-init:
+    profiles: ["logging"]
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.4.1
+    container_name: elasticsearch-logs-init
+    depends_on:
+      elasticsearch-logs:
+        condition: service_healthy
+    volumes:
+      - ../elk/scripts/apply_index_template.sh:/apply_index_template.sh:ro
+    entrypoint: ["/bin/bash", "/apply_index_template.sh"]
+    networks:
+      - movies_net
+
+  logstash:
+    profiles: ["logging"]
+    image: docker.elastic.co/logstash/logstash:9.4.1
+    container_name: logstash
+    depends_on:
+      elasticsearch-logs:
+        condition: service_healthy
+      elasticsearch-logs-init:
+        condition: service_completed_successfully
+    environment:
+      LS_JAVA_OPTS: ${LS_JAVA_OPTS:--Xms256m -Xmx512m}
+    ports:
+      # Публикуется ради отладки: в порт можно постучаться руками и отличить
+      # «Logstash не принимает» от «Filebeat не отправляет».
+      - "${LOGSTASH_BEATS_HOST_PORT:-5044}:5044"
+    healthcheck:
+      # 9600 отвечает только после того, как пайплайн собран и запущен. Без
+      # этого условия Filebeat стартовал бы раньше и писал ошибки соединения в
+      # закрытый 5044.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9600/_node/pipelines || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    volumes:
+      - ../elk/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ../elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      # Том ОБЯЗАТЕЛЕН: на нём лежат persisted queue и dead letter queue. Без
+      # него обе включённые в logstash.yml гарантии живут ровно до перезапуска.
+      - logstash_data:/usr/share/logstash/data
+    networks:
+      - movies_net
+
+  kibana:
+    profiles: ["logging"]
+    image: docker.elastic.co/kibana/kibana:9.4.1
+    container_name: kibana
+    depends_on:
+      elasticsearch-logs:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch-logs:9200"]'
+      SERVER_PUBLICBASEURL: http://localhost:${KIBANA_HOST_PORT:-5601}
+      # Без явного ключа Kibana генерирует новый на КАЖДЫЙ старт и теряет
+      # сохранённые объекты: созданный data view исчезает после перезапуска, и
+      # выглядит это как «Kibana перестала видеть индекс».
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KIBANA_ENCRYPTION_KEY:-practix_kibana_saved_objects_key_32b}
+    ports:
+      - "${KIBANA_HOST_PORT:-5601}:5601"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - kibana_data:/usr/share/kibana/data
+    networks:
+      - movies_net
+
+  filebeat:
+    profiles: ["logging"]
+    image: docker.elastic.co/beats/filebeat:9.4.1
+    container_name: filebeat
+    # root ОБЯЗАТЕЛЕН и проверен: каталоги /var/lib/docker/containers/<id>/ имеют
+    # режим 0700, файлы — 0640, владелец root. От непривилегированного
+    # пользователя Filebeat стартует штатно и МОЛЧА не находит ни одного файла:
+    # ошибок нет, индекс пустой — самый дорогой способ отладки из возможных.
+    user: root
+    # --strict.perms=false: Filebeat отказывается стартовать, если конфиг
+    # доступен на запись группе или остальным («config file must be owned by
+    # root»). На macOS bind-mount отдаёт файл как root:root 0644 и проверка
+    # проходит, но на Linux-хосте с umask 002 файл приезжает 0664 — и контейнер
+    # падает там, где у разработчика всё работало.
+    command: ["--strict.perms=false", "-e"]
+    depends_on:
+      logstash:
+        condition: service_healthy
+    environment:
+      # Имя проекта compose — единственный признак «наш контейнер», доступный
+      # до разбора содержимого строки. По нему Filebeat отсеивает контейнеры
+      # других проектов, запущенные на той же машине.
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-compose}
+    healthcheck:
+      # --strict.perms=false нужен и здесь: healthcheck запускает ОТДЕЛЬНЫЙ
+      # процесс filebeat, и без флага он упал бы на той же проверке прав, что и
+      # основной, — контейнер выглядел бы unhealthy при работающем сборщике.
+      #
+      # ТАЙМИНГИ ИЗМЕРЕНЫ, а не взяты по аналогии с соседями. `test output` — не
+      # ping: он поднимает полноценный инстанс beat'а с чтением конфига и
+      # реестра, и на этом стенде стабильно занимает ~16 с. С обычными для файла
+      # `timeout: 5s` контейнер уходил в unhealthy при исправно работающем
+      # сборщике — проверка отваливалась по времени, ни разу не дойдя до вывода.
+      # Интервал 2 минуты по той же причине: запускать 16-секундный процесс раз
+      # в полминуты дороже самой работы.
+      test: ["CMD-SHELL", "filebeat --strict.perms=false test output | grep -q 'talk to server... OK' || exit 1"]
+      interval: 120s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    volumes:
+      - ../elk/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      # Логи всех контейнеров хоста. На Docker Desktop путь резолвится ВНУТРИ
+      # виртуальной машины (на самой macOS такого каталога нет) — это работает
+      # и отдельной настройки file sharing не требует.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      # Сокет — только ради add_docker_metadata (имя контейнера и метки
+      # compose), :ro. Права на сокет = права на docker-демон.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Реестр смещений. Без тома перезапуск сборщика перечитывает все файлы с
+      # начала, и в Kibana появляется вся история заново.
+      - filebeat_data:/usr/share/filebeat/data
+    networks:
+      - movies_net
+
   # --- Сервис сбора пользовательских действий ------------------------------
   analytics-collector:
     build:
@@ -553,6 +809,9 @@ services:
       - ../../.env
     environment:
       STATE_FILE_PATH: /var/lib/etl/etl_state.json
+      # Трассировки у этого сервиса нет, но имя нужно сборщику ошибок: под ним
+      # он подписывает события тегом `service`.
+      OTEL_SERVICE_NAME: etl-elasticsearch
     depends_on:
       theatre-db:
         condition: service_healthy
@@ -645,6 +904,11 @@ services:
       analytics-collector:
         condition: service_healthy
         required: false
+      # Без required: false — в отличие от коллектора, сервис UGC живёт в ядре,
+      # а не в профиле. Причина техническая: Nginx резолвит имена upstream'ов при
+      # старте и падает с `host not found in upstream`, если контейнера нет.
+      ugc-api:
+        condition: service_healthy
     ports:
       - "${NGINX_HOST_PORT:-80}:80"
     networks:
@@ -764,6 +1028,86 @@ services:
     networks:
       - movies_net
 
+  # Своя база, а не таблицы в theatre-db или auth-db. Причина в выводах
+  # research/ugc-storage/README.md: профиль нагрузки UGC (чтений на порядок
+  # больше записей, запись конкурирует за преагрегат) не должен влиять на
+  # каталог и на вход в систему.
+  ugc-db:
+    image: postgres:16
+    container_name: ugc-db
+    environment:
+      POSTGRES_USER: ${UGC_API_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${UGC_API_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${UGC_API_POSTGRES_DB}
+    # 5432 — theatre-db, 5433 — auth-db, 5434 по умолчанию занимает стенд
+    # исследования (research/ugc-storage/.env.example).
+    ports:
+      - "${UGC_DB_HOST_PORT:-5435}:5432"
+    volumes:
+      - ugc_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${UGC_API_POSTGRES_USER} -d ${UGC_API_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - movies_net
+
+  # Образ тот же, что у `ugc-api`, и по той же причине, что у auth-migrations:
+  # миграции и приложение обязаны запускаться из одного набора байт. `build`
+  # объявлен у сервиса, которому образ принадлежит.
+  ugc-migrations:
+    image: practix/ugc-api:local
+    container_name: ugc-migrations
+    env_file:
+      - ../../.env
+    depends_on:
+      ugc-db:
+        condition: service_healthy
+    # -c с явным путём, а не смена working_dir: рабочий каталог образа менять
+    # нельзя — entrypoint создаёт там .env из .env.example.
+    command: >
+      sh -c "alembic -c apps/ugc-api/alembic.ini upgrade head"
+    networks:
+      - movies_net
+
+  ugc-api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: ugc-api
+      args:
+        PACKAGE: practix-ugc-api
+    image: practix/ugc-api:local
+    container_name: ugc-api
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: ugc-api
+      UGC_API_POSTGRES_HOST: ugc-db
+      UGC_API_POSTGRES_PORT: 5432
+    expose:
+      - "8000"
+    depends_on:
+      ugc-db:
+        condition: service_healthy
+      ugc-migrations:
+        condition: service_completed_successfully
+      # Redis нужен только для чтения денилиста отозванных токенов — его ведёт
+      # Auth, и читать его надо там же, где он пишется.
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - movies_net
+
 networks:
   movies_net:
     driver: bridge
@@ -776,6 +1120,7 @@ volumes:
   etl_state:
   static_volume:
   auth_pg_data:
+  ugc_pg_data:
   kafka_0_data:
   kafka_1_data:
   kafka_2_data:
@@ -788,3 +1133,9 @@ volumes:
   ch_keeper_03_data:
   prometheus_data:
   grafana_data:
+  glitchtip_pg_data:
+  glitchtip_uploads:
+  es_logs_data:
+  logstash_data:
+  kibana_data:
+  filebeat_data:

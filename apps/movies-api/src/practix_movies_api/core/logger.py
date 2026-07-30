@@ -15,10 +15,16 @@
 это её инвариант, а не совпадение.
 """
 
-from practix_core.logging import build_logging_config_from_env
+from practix_core.logging import build_logging_config_from_env, service_name_from_env
 from practix_core.logging import setup_logging as _setup_logging
 
 LOGGING = build_logging_config_from_env(
+    # Каждая запись подписывается именем сервиса. До этого различить сервисы в
+    # общем хранилище логов можно было только по имени контейнера — то есть по
+    # метаданным ДОСТАВКИ, которых у самой строки нет: смени способ сбора логов
+    # (или имя контейнера), и связь теряется. Имя берётся из OTEL_SERVICE_NAME,
+    # поэтому логи, трассировка и сбор ошибок называют сервис одинаково.
+    static_fields={'service': service_name_from_env('movies-api')},
     logger_levels={
         # Единый обработчик у всех логгеров uvicorn: иначе access-лог шёл бы
         # своим форматом и остался бы без request_id. Уровень берётся из

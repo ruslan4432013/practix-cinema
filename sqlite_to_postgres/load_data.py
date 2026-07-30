@@ -1,23 +1,19 @@
 import dataclasses
 import sqlite3
-from collections.abc import Callable
-from typing import Generator
+from collections.abc import Callable, Generator
 
 import psycopg
 from psycopg import ClientCursor
 from psycopg.rows import dict_row
 
-from sqlite_to_postgres.constant import BATCH_SIZE, ALLOWED_TABLES, PG_Connection, SQLite_Connection, dsl, sqlite_path
+from sqlite_to_postgres.constant import ALLOWED_TABLES, BATCH_SIZE, PG_Connection, SQLite_Connection, dsl, sqlite_path
 from sqlite_to_postgres.errors import NotAllowedTable
-from sqlite_to_postgres.mappers import map_genre, map_film_work, map_genre_film_work, map_person, \
-    map_person_film_work
+from sqlite_to_postgres.mappers import map_film_work, map_genre, map_genre_film_work, map_person, map_person_film_work
 from sqlite_to_postgres.shared_schemas import EntityWithDatabase
-from sqlite_to_postgres.sqlite_schemas import FilmWorkLite, GenreLite, GenreFilmWorkLite, PersonLite, \
-    PersonFilmWorkLite
+from sqlite_to_postgres.sqlite_schemas import FilmWorkLite, GenreFilmWorkLite, GenreLite, PersonFilmWorkLite, PersonLite
 
 
 class PostgresSaver:
-
     def __init__(self, pg_connection: PG_Connection):
         self.pg_connection = pg_connection
 
@@ -37,7 +33,9 @@ class PostgresSaver:
 
         pg_cursor = self.pg_connection.cursor()
 
-        query = f'INSERT INTO content.{table_name} ({column_names_str}) VALUES ({col_count}) ON CONFLICT (id) DO NOTHING'
+        query = (
+            f'INSERT INTO content.{table_name} ({column_names_str}) VALUES ({col_count}) ON CONFLICT (id) DO NOTHING'
+        )
 
         batch_as_tuples = [dataclasses.astuple(entity) for entity in entities]
 
@@ -57,14 +55,13 @@ class PostgresSaver:
 
 
 class SQLiteLoader:
-
     def __init__(self, sqlite_connection: SQLite_Connection):
         self.sqlite_connection = sqlite_connection
         self.sqlite_connection.row_factory = sqlite3.Row
 
-    def load_entity[Entity, Result = Entity](self, entity_cls: type[Entity],
-                                             mapper: Callable[[Entity], Result]) -> Generator[list[
-        Result], None, None]:
+    def load_entity[Entity, Result = Entity](
+        self, entity_cls: type[Entity], mapper: Callable[[Entity], Result]
+    ) -> Generator[list[Result]]:
         table_name = entity_cls.__tablename__
         if table_name not in ALLOWED_TABLES:
             raise NotAllowedTable(table_name=table_name)
@@ -72,9 +69,7 @@ class SQLiteLoader:
         for batch in self._transform_data(entity_cls):
             yield [mapper(el) for el in batch]
 
-    def _extract_data[Entity: EntityWithDatabase](self, entity_cls: type[Entity]) -> Generator[
-        list[sqlite3.Row], None, None]:
-
+    def _extract_data[Entity: EntityWithDatabase](self, entity_cls: type[Entity]) -> Generator[list[sqlite3.Row]]:
         table_name = entity_cls.__tablename__
 
         if table_name not in ALLOWED_TABLES:
@@ -85,9 +80,7 @@ class SQLiteLoader:
         while results := sqlite_cursor.fetchmany(BATCH_SIZE):
             yield results
 
-    def _transform_data[Entity: EntityWithDatabase](self, entity_cls: type[Entity]) -> Generator[
-        list[Entity], None, None]:
-
+    def _transform_data[Entity: EntityWithDatabase](self, entity_cls: type[Entity]) -> Generator[list[Entity]]:
         for batch in self._extract_data(entity_cls):
             # тут можно было бы, при необходимости, обработать полученные данные
             yield [entity_cls(**dict(value)) for value in batch]
@@ -115,7 +108,8 @@ def load_from_sqlite(connection: SQLite_Connection, pg_conn: PG_Connection):
 
 
 if __name__ == '__main__':
-    with sqlite3.connect(sqlite_path) as sqlite_conn, psycopg.connect(
-            **dsl, row_factory=dict_row, cursor_factory=ClientCursor
-    ) as pg_conn:
+    with (
+        sqlite3.connect(sqlite_path) as sqlite_conn,
+        psycopg.connect(**dsl, row_factory=dict_row, cursor_factory=ClientCursor) as pg_conn,
+    ):
         load_from_sqlite(sqlite_conn, pg_conn)

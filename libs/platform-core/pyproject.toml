@@ -27,6 +27,11 @@ otel = [
 ]
 httpx = ["opentelemetry-instrumentation-httpx>=0.64b0"]
 kafka = ["opentelemetry-instrumentation-aiokafka>=0.64b0"]
+# Сбор ошибок. НЕ sentry-sdk[fastapi]: тот extra тянет лишь сам fastapi, который
+# у FastAPI-сервисов и так есть, а в образ etl-clickhouse (practix-core[otel,kafka],
+# намеренно без fastapi) его протащить нельзя. Интеграции FastAPI/Django SDK
+# включает сам по факту импортируемости фреймворка.
+sentry = ["sentry-sdk>=2.66.1"]
 # Обвязка JWT: нужна трём FastAPI-приложениям, но не ETL.
 jwt = [
     "async-fastapi-jwt-auth>=0.6.6",

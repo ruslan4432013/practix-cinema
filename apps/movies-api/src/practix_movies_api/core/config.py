@@ -55,5 +55,19 @@ class Settings(BaseSettings):
     # OTLP/HTTP endpoint коллектора Jaeger (порт 4318).
     otel_exporter_otlp_endpoint: str = 'http://jaeger:4318'
 
+    # --- Сбор ошибок (Sentry / GlitchTip) ---
+    # Имена полей здесь в нижнем регистре по правилу этого сервиса, а читаются
+    # из тех же SENTRY_*: pydantic-settings ищет переменные без учёта регистра —
+    # ровно так же, как otel_enabled выше читает OTEL_ENABLED.
+    # Выключено по умолчанию: без поднятого приёмника SDK молотил бы в пустоту.
+    sentry_enabled: bool = False
+    sentry_dsn: str = ''
+    sentry_environment: str = 'dev'
+    sentry_release: str = ''
+    # Доля отправляемых событий ОБ ОШИБКАХ. Трассировку Sentry не ведёт —
+    # её ведёт Jaeger, см. докстринг practix_core.sentry.
+    sentry_sample_rate: float = 1.0
+    sentry_send_default_pii: bool = False
+
 
 settings = Settings()

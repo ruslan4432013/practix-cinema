@@ -43,6 +43,10 @@ dev = [
     "mypy>=1.18.2",
     "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",
+    # Для tools/notify_telegram.py. В окружении он и так оказывался — транзитивно
+    # через elasticsearch и aiokafka, — но зависимость, на которую есть import,
+    # должна быть объявлена: иначе смена версии соседнего пакета уносит её молча.
+    "aiohttp>=3.14.3",
 ]
 
 # --- Линтер и форматтер -----------------------------------------------------
@@ -97,6 +101,10 @@ ignore = [
 "tools/*.py" = ["T20"]
 # В CLI печать — это и есть пользовательский интерфейс.
 "apps/auth/src/practix_auth/cli.py" = ["T20"]
+# Стенд исследования хранилища: печать в stdout — его интерфейс, как у seed_db.py
+# и tools/. Правка sys.path перед импортом lib/ закрыта точечными noqa на самих
+# импортах: стенд живёт вне uv-workspace и настоящим пакетом не является.
+"research/**/*.py" = ["T20"]
 # Печать словаря топиков: модуль запускается как скрипт из create_topics.sh.
 "libs/analytics-contracts/src/practix_contracts/v1/topics.py" = ["T20"]
 # Django: атрибуты Meta и списки полей — часть фреймворка, а не изменяемые
@@ -123,6 +131,7 @@ known-first-party = [
     "practix_analytics_collector",
     "practix_etl_clickhouse",
     "practix_etl_elasticsearch",
+    "practix_ugc_api",
 ]
 
 [tool.ruff.format]

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import psycopg
 
-from sqlite_to_postgres.sqlite_schemas import FilmWorkLite, GenreLite, GenreFilmWorkLite, PersonLite, PersonFilmWorkLite
+from sqlite_to_postgres.sqlite_schemas import FilmWorkLite, GenreFilmWorkLite, GenreLite, PersonFilmWorkLite, PersonLite
 
 BATCH_SIZE = 100
 
@@ -19,4 +19,4 @@ dsl = {'dbname': 'movies_database', 'user': 'app', 'password': '123qwe', 'host':
 
 current_file = Path(__file__).resolve()
 
-sqlite_path = current_file.parent / "db.sqlite"
+sqlite_path = current_file.parent / 'db.sqlite'

@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 # сервером. Поэтому у practix-core берутся только otel и kafka — extras как раз
 # для того, чтобы FastAPI не приехал транзитивно.
 dependencies = [
-    "practix-core[otel,kafka]",
+    "practix-core[otel,kafka,sentry]",
     "practix-contracts",
     "aiokafka>=0.14.0",
     "cramjam==2.11.0",

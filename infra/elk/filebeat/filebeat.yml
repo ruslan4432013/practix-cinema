@@ -1,0 +1,83 @@
+# Сборщик логов. Читает НЕ приложения, а файлы, которые пишет штатный
+# docker-драйвер json-file. Приложения о существовании ELK не знают и не должны:
+# связь «приложение -> получатель логов» ломается при смене системы логирования
+# и требует правки кода каждого сервиса.
+
+filebeat.inputs:
+  - type: filestream
+    # id менять НЕЛЬЗЯ: по нему хранится реестр смещений. Новый id означает
+    # повторную вычитку всех файлов с начала, то есть дубликаты за всю историю.
+    id: docker-json-file
+    enabled: true
+    prospector.scanner.symlinks: true
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    parsers:
+      # Разбирает формат json-file: {"log","stream","time"} -> message / stream
+      # / @timestamp. И, что важнее, СКЛЕИВАЕТ куски строки: docker режет вывод
+      # на 16 КБ, и без этого парсера длинный traceback или крупный JSON
+      # приезжают несколькими обрывками, ни один из которых не разберётся.
+      - container:
+          stream: all
+          format: docker
+
+processors:
+  # Кто написал строку. Совпадение по пути: идентификатор контейнера — пятый
+  # сегмент /var/lib/docker/containers/<id>/<id>-json.log, отсюда
+  # match_source_index: 4. Даёт container.id / container.name / container.labels.
+  - add_docker_metadata:
+      host: "unix:///var/run/docker.sock"
+      match_source: true
+      match_source_index: 4
+
+  # ЧУЖИЕ КОНТЕЙНЕРЫ. Filebeat видит ВЕСЬ docker-хост, а не только наш стенд: на
+  # машине разработчика рядом крутятся контейнеры других проектов, и без этого
+  # фильтра их логи оказываются в practix-logs-*. Метка проекта compose —
+  # единственный признак «наш», доступный до всякого разбора содержимого.
+  # (Точки в именах меток заменяются на подчёркивания — labels.dedot включён по
+  # умолчанию.)
+  - drop_event:
+      when:
+        not:
+          equals:
+            container.labels.com_docker_compose_project: "${COMPOSE_PROJECT_NAME:compose}"
+
+  # ПЕТЛЯ ОБРАТНОЙ СВЯЗИ — главный риск всей конструкции. Logstash пишет в
+  # stdout строку на каждый принятый батч; эта строка попадает в свой json-file,
+  # Filebeat её читает и отправляет в Logstash, тот пишет следующую. Система
+  # входит в самоподдерживающийся режим и упирается в диск. Разрывать петлю
+  # нужно ЗДЕСЬ, до отправки, а не фильтром на стороне Logstash.
+  - drop_event:
+      when:
+        or:
+          - equals:
+              container.name: "filebeat"
+          - equals:
+              container.name: "logstash"
+          - equals:
+              container.name: "elasticsearch-logs"
+          - equals:
+              container.name: "kibana"
+
+  # Метаданные, одинаковые у каждой записи стенда (agent.*, ecs.*, input.type,
+  # log.flags) либо раздувающие маппинг (весь набор меток compose). Срезаются
+  # ПОСЛЕ фильтров выше — те как раз на этих метках и держатся.
+  - drop_fields:
+      fields: ["agent", "ecs", "input", "log.flags", "container.labels", "container.image"]
+      ignore_missing: true
+
+output.logstash:
+  hosts: ["logstash:5044"]
+  # Пачками и с переотправкой: Logstash может быть недоступен (перезапуск,
+  # выключенный профиль), и Filebeat обязан подождать, а не потерять.
+  bulk_max_size: 2048
+
+# Свои логи — только в stdout: том с логами внутри контейнера-сборщика логов
+# никто не читает. Периодическая статистика выключена — это строка INFO каждые
+# 30 секунд, которая всё равно отбрасывается фильтром петли и существует лишь
+# затем, чтобы ввести в заблуждение при отладке.
+logging.level: info
+logging.to_files: false
+logging.metrics.enabled: false
+
+monitoring.enabled: false

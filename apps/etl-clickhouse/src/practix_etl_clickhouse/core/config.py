@@ -119,6 +119,19 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = 'INFO'
     LOG_JSON: bool = True
 
+    # --- Сбор ошибок (Sentry / GlitchTip) -----------------------------------
+    # Выключено по умолчанию: без поднятого приёмника SDK молотил бы в пустоту.
+    # Здесь это особенно ценно: у фонового консьюмера нет ни HTTP-ответа, ни
+    # пользователя, который пожалуется, — авария видна только в логах.
+    # Сэмплирование ОШИБОК не наследует OTEL_TRACES_SAMPLER_RATIO: события
+    # схлопываются приёмником по группам, и терять их незачем.
+    SENTRY_ENABLED: bool = False
+    SENTRY_DSN: str = ''
+    SENTRY_ENVIRONMENT: str = 'dev'
+    SENTRY_RELEASE: str = ''
+    SENTRY_SAMPLE_RATE: float = 1.0
+    SENTRY_SEND_DEFAULT_PII: bool = False
+
     @field_validator('ETL_ENV')
     @classmethod
     def _normalize_env(cls, value: str) -> str:

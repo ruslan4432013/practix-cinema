@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Один файл на все пять Python-сервисов. До этого было пять Dockerfile'ов, из
+# Один файл на все шесть Python-сервисов. До этого было пять Dockerfile'ов, из
 # которых четыре — один шаблон с подставленными значениями, с побайтово
 # одинаковой четырёхстрочной шапкой. Ни один не использовал multi-stage, кеш
 # BuildKit или общий базовый слой, поэтому каждый сервис заново ставил весь свой
@@ -44,7 +44,7 @@ ARG UV_GROUPS=""
 # иначе каждое изменение кода снова ставит все зависимости.
 #
 # Перечисление НЕЛЬЗЯ заменить на `COPY apps/*/pyproject.toml apps/`: COPY с
-# подстановкой уплощает дерево, и шесть файлов схлопнутся в один. Список сверяется
+# подстановкой уплощает дерево, и все файлы схлопнутся в один. Список сверяется
 # с tool.uv.workspace.members проверкой в CI (tools/check_docker_manifests.py).
 COPY pyproject.toml uv.lock ./
 COPY libs/platform-core/pyproject.toml        libs/platform-core/
@@ -56,6 +56,7 @@ COPY apps/auth/pyproject.toml                 apps/auth/
 COPY apps/analytics-collector/pyproject.toml  apps/analytics-collector/
 COPY apps/etl-clickhouse/pyproject.toml       apps/etl-clickhouse/
 COPY apps/etl-elasticsearch/pyproject.toml    apps/etl-elasticsearch/
+COPY apps/ugc-api/pyproject.toml              apps/ugc-api/
 
 # --locked: сборка ПАДАЁТ на устаревшем локе. Это и есть замена никогда не
 # существовавшему constraints.txt — утверждение, проверяемое на сборке, а не
@@ -120,4 +121,26 @@ CMD ["python", "-m", "practix_etl_clickhouse.main"]
 
 FROM runtime AS etl-elasticsearch
 # Ни EXPOSE, ни HEALTHCHECK: сервис не слушает порт, это разовый цикл синхронизации.
+#
+# Каталог под STATE_FILE_PATH создаётся В ОБРАЗЕ и заранее отдаётся appuser.
+# Иначе именованный том etl_state, который compose монтирует в /var/lib/etl,
+# инициализируется правами несуществующего в образе каталога — root:root, — и
+# процесс под uid 1001 не может записать состояние. Отказ при этом тихий:
+# первая пачка грузится, `commit` падает с PermissionError, внешний `except`
+# в цикле его проглатывает, и каждый следующий проход начинается с нуля. Синхронизация
+# навсегда останавливается на первой пачке (100 персон из 4166), а сервис
+# остаётся «живым». Docker переносит владельца каталога образа на пустой том —
+# ровно поэтому chown обязан быть здесь, а не в entrypoint.
+USER root
+RUN mkdir -p /var/lib/etl && chown appuser:appuser /var/lib/etl
+USER appuser
 CMD ["python", "-m", "practix_etl_elasticsearch.main"]
+
+FROM runtime AS ugc-api
+# Проба идёт на /health/live, а не на openapi.json: она дешевле и не зависит от
+# базы — перезапуск контейнера не чинит упавший PostgreSQL. X-Request-Id в пробе
+# всё равно обязателен: RequestIdMiddleware работает в режиме reject_400 и без
+# заголовка вернул бы 400 даже на health.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
+  CMD python -c "import sys,urllib.request as u; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id':'healthcheck'}); sys.exit(0 if u.urlopen(r,timeout=3).status==200 else 1)"
+CMD ["uvicorn", "practix_ugc_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

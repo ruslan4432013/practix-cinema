@@ -1,0 +1,257 @@
+# Стенд исследования хранилища под UGC (лайки, рецензии, закладки).
+#
+# Файл намеренно отдельный от infra/compose: это учебный стенд для замеров, а не
+# часть боевого стека. У него свой проект (`name`) и своя сеть, поэтому основной
+# стек можно не поднимать — и наоборот, стенд не отбирает у него порты.
+#
+# Профили: mongo | postgres | clickhouse. Поднимать нужно ПО ОДНОМУ — три
+# хранилища на одной машине конкурируют за page cache, и замеры перестают
+# что-либо значить. Без профиля не поднимается ничего.
+name: ugc-research
+
+x-mongod-shard: &mongod-shard
+  image: mongo:8.0
+  profiles: ['mongo']
+  networks: [research_net]
+  healthcheck:
+    test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping').ok"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+    start_period: 10s
+  # Два обязательных для этого стенда параметра.
+  #
+  # wiredTigerCacheSizeGB: по умолчанию mongod берёт под кеш половину памяти
+  # хоста минус гигабайт. Каждый из десяти узлов считает так независимо от
+  # остальных — и на машине с 16 ГБ шарды выживают друг друга, а заливка падает
+  # с «Could not find host matching read preference primary». Лимит контейнера
+  # без этого параметра не помогает: он лишь превращает вытеснение в OOM-kill.
+  #
+  # orphanCleanupDelaySecs: после миграции чанка MongoDB держит «сирот» на
+  # источнике 900 секунд, и повторная миграция в тот же диапазон падает по
+  # таймауту. Пресплит раскладывает 16 чанков подряд — ждать по 15 минут между
+  # ними не за чем.
+  command: &mongod-sh1-command
+    ['mongod', '--shardsvr', '--replSet', 'sh1rs', '--port', '27017', '--bind_ip_all',
+     '--wiredTigerCacheSizeGB', '0.5',
+     '--setParameter', 'orphanCleanupDelaySecs=1']
+  mem_limit: 2g
+
+x-mongod-sh1: &mongod-sh1
+  <<: *mongod-shard
+  command: *mongod-sh1-command
+
+x-mongod-sh2: &mongod-sh2
+  <<: *mongod-shard
+  command:
+    ['mongod', '--shardsvr', '--replSet', 'sh2rs', '--port', '27017', '--bind_ip_all',
+     '--wiredTigerCacheSizeGB', '0.5',
+     '--setParameter', 'orphanCleanupDelaySecs=1']
+
+x-mongod-config: &mongod-config
+  image: mongo:8.0
+  profiles: ['mongo']
+  networks: [research_net]
+  # Config-набор хранит только метаданные кластера — гигабайты кеша ему ни к чему.
+  command:
+    ['mongod', '--configsvr', '--replSet', 'cfgrs', '--port', '27017', '--bind_ip_all',
+     '--wiredTigerCacheSizeGB', '0.25']
+  mem_limit: 640m
+  healthcheck:
+    test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping').ok"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+    start_period: 10s
+
+services:
+  # --- MongoDB: config replica set (3 узла) --------------------------------
+  mongo-cfg-01:
+    <<: *mongod-config
+    container_name: research-mongo-cfg-01
+    volumes: [mongo_cfg_01:/data/configdb]
+
+  mongo-cfg-02:
+    <<: *mongod-config
+    container_name: research-mongo-cfg-02
+    volumes: [mongo_cfg_02:/data/configdb]
+
+  mongo-cfg-03:
+    <<: *mongod-config
+    container_name: research-mongo-cfg-03
+    volumes: [mongo_cfg_03:/data/configdb]
+
+  # --- MongoDB: шард 1 (3 реплики) -----------------------------------------
+  mongo-sh1-01:
+    <<: *mongod-sh1
+    container_name: research-mongo-sh1-01
+    volumes: [mongo_sh1_01:/data/db]
+
+  mongo-sh1-02:
+    <<: *mongod-sh1
+    container_name: research-mongo-sh1-02
+    volumes: [mongo_sh1_02:/data/db]
+
+  mongo-sh1-03:
+    <<: *mongod-sh1
+    container_name: research-mongo-sh1-03
+    volumes: [mongo_sh1_03:/data/db]
+
+  # --- MongoDB: шард 2 (3 реплики) -----------------------------------------
+  mongo-sh2-01:
+    <<: *mongod-sh2
+    container_name: research-mongo-sh2-01
+    volumes: [mongo_sh2_01:/data/db]
+
+  mongo-sh2-02:
+    <<: *mongod-sh2
+    container_name: research-mongo-sh2-02
+    volumes: [mongo_sh2_02:/data/db]
+
+  mongo-sh2-03:
+    <<: *mongod-sh2
+    container_name: research-mongo-sh2-03
+    volumes: [mongo_sh2_03:/data/db]
+
+  # --- Одноразовая инициализация реплик ------------------------------------
+  # Два отдельных job'а, а не один: `sh.addShard` требует живого mongos, а mongos
+  # не поднимется, пока config replica set не инициирован. Образец — kafka-init
+  # и clickhouse-init в infra/compose.
+  mongo-init-rs:
+    image: mongo:8.0
+    profiles: ['mongo']
+    container_name: research-mongo-init-rs
+    networks: [research_net]
+    depends_on:
+      mongo-cfg-01: {condition: service_healthy}
+      mongo-cfg-02: {condition: service_healthy}
+      mongo-cfg-03: {condition: service_healthy}
+      mongo-sh1-01: {condition: service_healthy}
+      mongo-sh1-02: {condition: service_healthy}
+      mongo-sh1-03: {condition: service_healthy}
+      mongo-sh2-01: {condition: service_healthy}
+      mongo-sh2-02: {condition: service_healthy}
+      mongo-sh2-03: {condition: service_healthy}
+    volumes:
+      - ./config/mongo:/scripts:ro
+    entrypoint: ['bash', '/scripts/init_rs.sh']
+
+  mongos-01:
+    image: mongo:8.0
+    profiles: ['mongo']
+    container_name: research-mongos-01
+    networks: [research_net]
+    depends_on:
+      mongo-init-rs: {condition: service_completed_successfully}
+    command:
+      - mongos
+      - --configdb
+      - cfgrs/mongo-cfg-01:27017,mongo-cfg-02:27017,mongo-cfg-03:27017
+      - --port
+      - '27017'
+      - --bind_ip_all
+    mem_limit: 512m
+    ports:
+      - '${MONGOS_HOST_PORT:-27017}:27017'
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  mongo-init:
+    image: mongo:8.0
+    profiles: ['mongo']
+    container_name: research-mongo-init
+    networks: [research_net]
+    depends_on:
+      mongos-01: {condition: service_healthy}
+    volumes:
+      - ./config/mongo:/scripts:ro
+    entrypoint: ['mongosh', '--host', 'mongos-01', '--port', '27017', '--file', '/scripts/init_cluster.js']
+
+  # --- PostgreSQL: база сравнения ------------------------------------------
+  # Один узел: его роль здесь — эталон, а не демонстрация масштабирования.
+  research-pg:
+    # Не alpine: на musl другой аллокатор, и для стенда, где меряют латентность,
+    # разумнее взять ту же сборку, что и в основном стеке проекта.
+    image: postgres:16
+    profiles: ['postgres']
+    container_name: research-pg
+    networks: [research_net]
+    environment:
+      POSTGRES_DB: ${RESEARCH_PG_DB:-ugc}
+      POSTGRES_USER: ${RESEARCH_PG_USER:-research}
+      POSTGRES_PASSWORD: ${RESEARCH_PG_PASSWORD:-research}
+    command:
+      # Дефолты postgres рассчитаны на 128 МБ shared_buffers и делают сравнение
+      # нечестным: Mongo и ClickHouse из коробки берут память куда агрессивнее.
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=3GB
+      - -c
+      - work_mem=32MB
+      - -c
+      - max_connections=200
+    # По умолчанию Docker даёт контейнеру 64 МБ /dev/shm, а параллельные воркеры
+    # PostgreSQL размещают там свои сегменты: VACUUM ANALYZE по таблице на
+    # 10 млн строк падает с «could not resize shared memory segment».
+    shm_size: 1g
+    volumes:
+      - ./config/postgres:/docker-entrypoint-initdb.d:ro
+      - research_pg_data:/var/lib/postgresql/data
+    ports:
+      - '${RESEARCH_PG_HOST_PORT:-5434}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${RESEARCH_PG_USER:-research} -d ${RESEARCH_PG_DB:-ugc}']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # --- ClickHouse: база сравнения ------------------------------------------
+  # Пользователь задан явно: официальный образ отключает сетевой доступ для
+  # `default` без пароля (та же причина, что и в основном стеке проекта).
+  research-ch:
+    image: clickhouse/clickhouse-server:25.3
+    profiles: ['clickhouse']
+    container_name: research-ch
+    networks: [research_net]
+    environment:
+      CLICKHOUSE_DB: ${RESEARCH_CH_DB:-ugc}
+      CLICKHOUSE_USER: ${RESEARCH_CH_USER:-research}
+      CLICKHOUSE_PASSWORD: ${RESEARCH_CH_PASSWORD:-research}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1'
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./config/clickhouse:/docker-entrypoint-initdb.d:ro
+      - research_ch_data:/var/lib/clickhouse
+    ports:
+      - '${RESEARCH_CH_HTTP_HOST_PORT:-8127}:8123'
+      - '${RESEARCH_CH_NATIVE_HOST_PORT:-9014}:9000'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O - http://127.0.0.1:8123/ping | grep -q Ok']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+networks:
+  research_net:
+    driver: bridge
+
+volumes:
+  mongo_cfg_01:
+  mongo_cfg_02:
+  mongo_cfg_03:
+  mongo_sh1_01:
+  mongo_sh1_02:
+  mongo_sh1_03:
+  mongo_sh2_01:
+  mongo_sh2_02:
+  mongo_sh2_03:
+  research_pg_data:
+  research_ch_data:

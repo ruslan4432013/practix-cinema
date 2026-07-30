@@ -31,6 +31,9 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.43.0",
     "opentelemetry-instrumentation-django>=0.64b0",
     "opentelemetry-instrumentation-requests>=0.64b0",
+    # Сбор ошибок. Прямая зависимость, а не extra practix-core: библиотеки
+    # монорепозитория за границей этого лока недоступны (см. wsgi.py).
+    "sentry-sdk>=2.66.1",
 ]
 
 [build-system]

@@ -1,0 +1,48 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "ugc-api",
+  "projectType": "application",
+  "sourceRoot": "apps/ugc-api/src",
+  "tags": [
+    "lang:python",
+    "scope:ugc",
+    "type:app"
+  ],
+  "targets": {
+    "lint": {},
+    "test": {
+      "options": {
+        "command": "uv run --package practix-ugc-api --group test pytest apps/ugc-api/tests/unit -v"
+      }
+    },
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target ugc-api --build-arg PACKAGE=practix-ugc-api --load -t practix/ugc-api:local ."
+      }
+    },
+    "test-functional": {
+      "inputs": [
+        "python",
+        "pythonTests",
+        "^python",
+        "sharedGlobals",
+        "{workspaceRoot}/infra/compose/**",
+        "{workspaceRoot}/infra/docker/**"
+      ],
+      "options": {
+        "commands": [
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose run --rm --build ugc-api-tests",
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose down -v"
+        ]
+      }
+    },
+    "migrate": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "cwd": "{workspaceRoot}",
+        "command": "uv run --package practix-ugc-api alembic -c apps/ugc-api/alembic.ini upgrade head"
+      }
+    }
+  }
+}

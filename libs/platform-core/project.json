@@ -12,7 +12,7 @@
     "lint": {},
     "test": {
       "options": {
-        "command": "uv run --no-project --python 3.13 --with pytest --with pytest-asyncio --with httpx --with-editable 'libs/platform-core[asgi,fastapi,otel,jwt]' pytest -c libs/platform-core/pytest.ini libs/platform-core/tests -v"
+        "command": "uv run --no-project --with pytest --with pytest-asyncio --with httpx --with-editable 'libs/platform-core[asgi,fastapi,otel,jwt,sentry]' pytest -c libs/platform-core/pytest.ini libs/platform-core/tests -v"
       }
     },
     "typecheck": {

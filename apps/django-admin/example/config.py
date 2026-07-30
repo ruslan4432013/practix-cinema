@@ -34,10 +34,27 @@ class Settings(BaseSettings):
     AUTH_API_TIMEOUT: float = 2.0
     AUTH_API_MAX_ATTEMPTS: int = 3
 
+    # --- Логи ---
+    # Те же ключи, что у остальных сервисов стенда, и тот же корневой .env:
+    # JSON собирает сборщик логов, текст удобнее при локальной отладке.
+    LOG_LEVEL: str = 'INFO'
+    LOG_JSON: bool = True
+
     # --- Distributed tracing (OpenTelemetry / Jaeger) ---
     OTEL_ENABLED: bool = True
     OTEL_EXPORTER_OTLP_ENDPOINT: str = 'http://jaeger:4318'
     OTEL_SERVICE_NAME: str = 'django-admin'
+
+    # --- Сбор ошибок (Sentry / GlitchTip) ---
+    # Ключи те же, что у остальных сервисов стенда: приёмник один, различает
+    # сервисы тег `service`. Выключено по умолчанию — без поднятого приёмника
+    # SDK молотил бы в пустоту.
+    SENTRY_ENABLED: bool = False
+    SENTRY_DSN: str = ''
+    SENTRY_ENVIRONMENT: str = 'dev'
+    SENTRY_RELEASE: str = ''
+    SENTRY_SAMPLE_RATE: float = 1.0
+    SENTRY_SEND_DEFAULT_PII: bool = False
 
 
 settings = Settings()

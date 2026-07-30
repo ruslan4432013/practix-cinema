@@ -1,6 +1,7 @@
 import logging
 import time
 
+from practix_core.sentry import init_sentry
 from practix_etl_elasticsearch.gears.genres.extractor import GenresExtractor
 from practix_etl_elasticsearch.gears.genres.index import GENRES_INDEX_BODY
 from practix_etl_elasticsearch.gears.genres.transform import GenresTransform
@@ -12,6 +13,7 @@ from practix_etl_elasticsearch.gears.persons.extractor import PersonsExtractor
 from practix_etl_elasticsearch.gears.persons.index import PERSONS_INDEX_BODY
 from practix_etl_elasticsearch.gears.persons.transform import PersonsTransform
 from practix_etl_elasticsearch.lib.storage import JsonFileStorage, State
+from practix_etl_elasticsearch.logger import setup_logging
 from practix_etl_elasticsearch.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -96,9 +98,19 @@ def build_persons_etl() -> ETLProcess:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    setup_logging()
+    # Строго ПОСЛЕ setup_logging: LoggingIntegration вешается на обработку записей,
+    # и именно она превращает logger.exception из блоков ниже в события. Без
+    # неё авария в цикле остаётся строкой в stdout, которую никто не читает.
+    # OpenTelemetry в этом образе нет — тег trace_id просто не проставится.
+    init_sentry(
+        enabled=settings.SENTRY_ENABLED,
+        dsn=settings.SENTRY_DSN,
+        service_name=settings.OTEL_SERVICE_NAME,
+        environment=settings.SENTRY_ENVIRONMENT,
+        release=settings.SENTRY_RELEASE,
+        sample_rate=settings.SENTRY_SAMPLE_RATE,
+        send_default_pii=settings.SENTRY_SEND_DEFAULT_PII,
     )
     movies_etl = build_etl()
     genres_etl = build_genres_etl()

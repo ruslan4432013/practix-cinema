@@ -16,6 +16,7 @@ import contextlib
 import logging
 import signal
 
+from practix_core.sentry import init_sentry
 from practix_etl_clickhouse.brokers.consumer import build_consumer, start_with_retry
 from practix_etl_clickhouse.brokers.rebalance import FlushOnRevokeListener
 from practix_etl_clickhouse.core import metrics
@@ -70,6 +71,18 @@ async def run() -> None:
     # Трассировка поднимается ДО консьюмера: AIOKafkaInstrumentor подменяет
     # методы класса, и консьюмер, созданный раньше, инструментации не получит.
     init_tracer_provider()
+    # Сбор ошибок. У фонового консьюмера нет ни HTTP-ответа, ни пользователя,
+    # который пожалуется: до сих пор единственным следом аварии была строка
+    # logger.exception в stdout. LoggingIntegration превращает её в событие.
+    init_sentry(
+        enabled=settings.SENTRY_ENABLED,
+        dsn=settings.SENTRY_DSN,
+        service_name=settings.OTEL_SERVICE_NAME,
+        environment=settings.SENTRY_ENVIRONMENT,
+        release=settings.SENTRY_RELEASE,
+        sample_rate=settings.SENTRY_SAMPLE_RATE,
+        send_default_pii=settings.SENTRY_SEND_DEFAULT_PII,
+    )
     start_metrics_server()
 
     sink = ClickHouseSink()

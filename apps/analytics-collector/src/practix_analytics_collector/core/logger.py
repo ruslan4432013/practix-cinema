@@ -24,6 +24,10 @@ def build_config() -> dict:
     return build_logging_config(
         level=settings.LOG_LEVEL,
         json_output=settings.LOG_JSON,
+        # Имя сервиса в каждой записи — то же OTEL_SERVICE_NAME, что у
+        # трассировки. В общем хранилище логов записи иначе различимы только по
+        # имени контейнера, то есть по метаданным доставки, а не по самой строке.
+        static_fields={'service': settings.OTEL_SERVICE_NAME},
         logger_levels={
             'uvicorn': settings.LOG_LEVEL,
             'uvicorn.error': settings.LOG_LEVEL,

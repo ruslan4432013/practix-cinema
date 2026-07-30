@@ -258,6 +258,35 @@ def test_json_output_defaults_to_true(monkeypatch):
     assert json_output_from_env() is True
 
 
+def test_service_name_from_env(monkeypatch):
+    from practix_core.logging import service_name_from_env
+
+    monkeypatch.setenv('OTEL_SERVICE_NAME', 'auth-service')
+    assert service_name_from_env('auth') == 'auth-service'
+    monkeypatch.delenv('OTEL_SERVICE_NAME')
+    assert service_name_from_env('auth') == 'auth'
+
+
+def test_static_fields_pass_through_from_env_builder(monkeypatch):
+    """rest/auth не имеют доступа к своим настройкам и передают имя сервиса сюда."""
+    from practix_core.logging import build_logging_config_from_env
+
+    monkeypatch.delenv('LOG_LEVEL', raising=False)
+    config = build_logging_config_from_env(static_fields={'service': 'movies-api'})
+    assert config['formatters']['json']['static_fields'] == {'service': 'movies-api'}
+
+
+def test_service_field_follows_request_id_in_key_order():
+    """Контракт строки, на который опираются Logstash и запросы в Kibana.
+
+    Набор и ПОРЯДОК ключей одинаковы у всех сервисов стенда — включая форк
+    форматтера в django-admin, который вне uv-workspace и библиотеку
+    импортировать не может.
+    """
+    line = JsonFormatter(static_fields={'service': 'movies-api'}).format(_record(request_id='rid-4'))
+    assert list(json.loads(line)) == ['timestamp', 'level', 'logger', 'message', 'request_id', 'service']
+
+
 def test_none_logger_level_inherits_root(monkeypatch):
     """rest/auth задают уровень uvicorn как «тот же, что у root»."""
     from practix_core.logging import build_logging_config_from_env
