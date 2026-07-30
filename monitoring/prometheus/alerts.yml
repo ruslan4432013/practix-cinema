@@ -1,0 +1,146 @@
+groups:
+  - name: ugc-etl
+    rules:
+      # Ровно требование задания «приложение не должно течь».
+      # Производная RSS за час, устойчиво положительная три часа подряд, —
+      # это уже не всплеск нагрузки, а монотонный рост. Порог по абсолютному
+      # значению RSS здесь не годится: он зависит от объёма трафика, а
+      # утечка — это форма кривой, а не её высота.
+      - alert: EtlMemoryGrowth
+        expr: deriv(process_resident_memory_bytes{job="etl-clickhouse"}[1h]) > 0
+        for: 3h
+        labels:
+          severity: warning
+        annotations:
+          summary: "RSS ETL растёт монотонно третий час — вероятная утечка"
+          description: "Перезапустить с ETL_TRACEMALLOC_ENABLED=True и смотреть топ-10 приростов в логах."
+
+      # Тот же вопрос с другой стороны: число живых блоков CPython не зависит
+      # от поведения аллокатора и растёт только когда объекты реально не
+      # освобождаются.
+      - alert: EtlAllocatedBlocksGrowth
+        expr: deriv(etl_ch_allocated_blocks[1h]) > 0
+        for: 3h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Число живых объектов CPython в ETL растёт монотонно"
+
+      - alert: EtlClickHouseDown
+        expr: etl_ch_clickhouse_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ETL не может писать в ClickHouse"
+          description: "Данные копятся в Kafka (backpressure), потери нет, но лаг растёт."
+
+      - alert: EtlKafkaDown
+        expr: etl_ch_kafka_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ETL не может читать из Kafka"
+
+      # Лаг сам по себе не авария — он растёт и при штатной паузе на время
+      # недоступности хранилища. Аварией его делает устойчивый рост.
+      - alert: EtlLagGrowing
+        expr: etl_ch_consumer_lag_total > 100000 and deriv(etl_ch_consumer_lag_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ETL не успевает за потоком: лаг растёт"
+
+      # Карантин обязан быть пустым. Любое попадание туда — расхождение
+      # контракта между коллектором и ETL, и разбирать его надо сразу.
+      - alert: EtlInvalidMessages
+        expr: increase(etl_ch_messages_invalid_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Сообщения попадают в ugc.invalid_events"
+
+      # «Всё зелёное, а данные не идут» — сценарий, который не ловит ни один
+      # алерт выше: зависимости живы, лаг может быть нулевым (например, поток
+      # иссяк из-за поломки НА СТОРОНЕ коллектора), а вставок нет.
+      # Условие по лагу обязательно: без него правило срабатывало бы каждую
+      # ночь на любом стенде, где трафика просто нет.
+      - alert: EtlNoDataFlowing
+        expr: time() - etl_ch_last_flush_timestamp > 600 and etl_ch_consumer_lag_total > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ETL не вставлял данные больше 10 минут при ненулевом лаге"
+          description: "Сообщения в Kafka есть, но в ClickHouse ничего не уезжает — смотреть логи ETL."
+
+  # --- Analytics Collector -------------------------------------------------
+  # Ingest-ручка не возвращает 5xx по построению, поэтому «сервис жив» здесь
+  # ничего не значит: деградация видна только по метрикам.
+  - name: ugc-collector
+    rules:
+      # Метрика коллектора: событие не доехало ни в Kafka, ни в буфер.
+      # Единственная метрика системы, ненулевое значение которой означает
+      # безвозвратную потерю данных.
+      - alert: UgcEventsDropped
+        expr: increase(ugc_events_dropped_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Коллектор теряет события"
+          description: "Недоступны и Kafka, и Redis-буфер. Данные потеряны безвозвратно."
+
+      # Ноль воркеров с подключённым продюсером = приём идёт целиком в буфер.
+      # Промежуточное значение — частичная деградация: часть воркеров работает
+      # штатно, часть пишет в буфер (метрика собирается в режиме livesum).
+      - alert: UgcBrokerDisconnected
+        expr: ugc_broker_connected_workers == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ни один воркер коллектора не подключён к Kafka"
+
+      - alert: UgcBrokerPartiallyDisconnected
+        expr: ugc_broker_connected_workers > 0 and ugc_broker_connected_workers < 4
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Часть воркеров коллектора потеряла продюсер Kafka"
+          description: "Порог 4 = число воркеров uvicorn (см. CMD в analytics_collector/Dockerfile)."
+
+      # Буфер сам по себе не авария — он для того и сделан. Аварией его делает
+      # МОНОТОННЫЙ рост: значит дренаж не справляется, и рано или поздно буфер
+      # упрётся в UGC_FALLBACK_MAX_SIZE, после чего события начнут теряться.
+      - alert: UgcFallbackBufferGrowing
+        expr: deriv(ugc_fallback_buffer_size[15m]) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Буфер деградации коллектора растёт монотонно полчаса"
+          description: "Дренаж не успевает. При достижении UGC_FALLBACK_MAX_SIZE события начнут теряться."
+
+      # DLQ обязан быть пустым: попадание туда означает, что запись не удалось
+      # доставить за UGC_FALLBACK_MAX_ATTEMPTS попыток.
+      - alert: UgcDeadLettered
+        expr: increase(ugc_fallback_dead_lettered_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Записи коллектора уходят в DLQ"
+
+      # Доля отброшенных ботов сама по себе нормальна, но резкий скачок — это
+      # либо начавшийся обход краулером, либо сломанный разбор User-Agent.
+      - alert: UgcBotTrafficSpike
+        expr: |
+          sum(rate(ugc_events_filtered_total{reason="bot"}[15m]))
+            > 0.5 * sum(rate(ugc_events_received_total[15m]))
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Больше половины входящих событий отсеивается как трафик ботов"

@@ -1,0 +1,714 @@
+# Общая часть четырёх узлов ClickHouse. Различаются они только macros-файлом,
+# volume'ом и опубликованными портами, поэтому всё остальное вынесено в якорь:
+# иначе одну и ту же правку пришлось бы вносить в четыре места, и рано или
+# поздно один из узлов от неё отстал бы.
+x-clickhouse-server: &clickhouse-server
+  image: clickhouse/clickhouse-server:25.3
+  environment:
+    CH_PASSWORD: ${CH_PASSWORD:-etl}
+  depends_on:
+    clickhouse-keeper-01:
+      condition: service_healthy
+    clickhouse-keeper-02:
+      condition: service_healthy
+    clickhouse-keeper-03:
+      condition: service_healthy
+  # Официальный образ требует поднятого лимита дескрипторов: MergeTree держит
+  # открытыми файлы всех активных кусков, и при дефолтных 1024 сервер сыплется
+  # «Too many open files» на первой же заметной нагрузке.
+  ulimits:
+    nofile:
+      soft: 262144
+      hard: 262144
+  healthcheck:
+    # /ping не требует авторизации, поэтому проба не зависит от пароля.
+    test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8123/ping | grep -q Ok"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 30s
+  networks:
+    - movies_net
+
+# Keeper отличается между узлами только файлом конфигурации и volume'ом.
+x-clickhouse-keeper: &clickhouse-keeper
+  image: clickhouse/clickhouse-keeper:25.3
+  healthcheck:
+    # Четырёхбуквенная команда ruok — штатный healthcheck ZooKeeper-протокола:
+    # отвечает imok только когда узел присоединился к кворуму.
+    test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9181; printf ruok >&3; head -c4 <&3' | grep -q imok"]
+    interval: 10s
+    timeout: 5s
+    retries: 20
+    start_period: 15s
+  networks:
+    - movies_net
+
+services:
+  theatre-db:
+    image: postgres:16
+    container_name: theatre-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./database_dump.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./django_admin/reset_django_auth.sql:/docker-entrypoint-initdb.d/zz_reset_django_auth.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - movies_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    # Без maxmemory Redis растёт до предела контейнера, а при дефолтной политике
+    # noeviction начинает отвечать ошибкой на КАЖДУЮ запись — то есть отказ
+    # выглядит как отказ Auth целиком, а не как деградация кэша.
+    # volatile-lru вытесняет только ключи с TTL: под давлением жертвой
+    # становятся записи кэша Movies API, а не структуры без TTL.
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy ${REDIS_MAXMEMORY_POLICY:-volatile-lru}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - movies_net
+
+  # Отдельный экземпляр под аналитику. Раньше буфер деградации, счётчики rate
+  # limit и дедупликация коллектора жили в общем Redis (разведённые лишь по
+  # номеру базы), то есть многочасовой отказ Kafka вытеснял бы из памяти сессии
+  # Auth: авария в аналитике роняла бы вход на сайт. Разные экземпляры — разная
+  # судьба при отказе.
+  redis-ugc:
+    image: redis:7-alpine
+    container_name: redis-ugc
+    # noeviction здесь — осознанный выбор, обратный соседнему. Буфер деградации
+    # хранит ещё не доставленные события: вытеснить их значит потерять молча.
+    # Отказ записи, наоборот, идёт по спроектированному пути — событие
+    # отбрасывается с метрикой ugc_events_dropped_total и ERROR в логе.
+    # Верхняя граница длины буфера (UGC_FALLBACK_MAX_SIZE) остаётся первым
+    # рубежом, maxmemory — вторым.
+    command: >
+      redis-server
+      --maxmemory ${UGC_REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy noeviction
+    volumes:
+      - redis_ugc_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - movies_net
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.4.1
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - movies_net
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    networks:
+      - movies_net
+
+  # --- Кластер Kafka (KRaft, без ZooKeeper) --------------------------------
+  # Три узла, каждый совмещает роли broker и controller. Такой размер выбран не
+  # для нагрузки, а ради осмысленной отказоустойчивости: при RF=3 и
+  # min.insync.replicas=2 кластер переживает потерю одного узла без остановки
+  # записи и без потери данных. На одном брокере это не проверить.
+  kafka-0:
+    image: apache/kafka:3.9.1
+    container_name: kafka-0
+    environment:
+      KAFKA_NODE_ID: 0
+      KAFKA_PROCESS_ROLES: broker,controller
+      # Кворум контроллеров: перечислены все три узла.
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka-0:9093,1@kafka-1:9093,2@kafka-2:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # PLAINTEXT — трафик внутри сети Docker, EXTERNAL — доступ с хоста.
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-0:9092,EXTERNAL://127.0.0.1:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+      # Служебные топики тоже реплицируем на три узла — иначе отказ одного
+      # брокера уронил бы хранение оффсетов consumer-групп.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      # Автосоздание выключено: топики заводит kafka-init с проверенными
+      # параметрами, а опечатка в имени топика должна быть видимой ошибкой,
+      # а не молча созданным топиком с настройками по умолчанию.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9094:9094"
+    volumes:
+      - kafka_0_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - movies_net
+
+  kafka-1:
+    image: apache/kafka:3.9.1
+    container_name: kafka-1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka-0:9093,1@kafka-1:9093,2@kafka-2:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,EXTERNAL://127.0.0.1:9095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9095:9094"
+    volumes:
+      - kafka_1_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - movies_net
+
+  kafka-2:
+    image: apache/kafka:3.9.1
+    container_name: kafka-2
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka-0:9093,1@kafka-1:9093,2@kafka-2:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092,EXTERNAL://127.0.0.1:9096
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9096:9094"
+    volumes:
+      - kafka_2_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - movies_net
+
+  # Одноразовая задача создания топиков — по образцу auth-migrations.
+  # Идемпотентна (--if-not-exists), поэтому безопасно выполняется при каждом
+  # подъёме стека.
+  kafka-init:
+    image: apache/kafka:3.9.1
+    container_name: kafka-init
+    depends_on:
+      kafka-0:
+        condition: service_healthy
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+    volumes:
+      - ./analytics_collector/scripts/create_topics.sh:/create_topics.sh:ro
+    entrypoint: ["/bin/bash", "/create_topics.sh"]
+    networks:
+      - movies_net
+
+  kafka-ui:
+    # kafbat/kafka-ui — поддерживаемый форк provectuslabs/kafka-ui,
+    # оригинальный репозиторий переведён в архив.
+    image: kafbat/kafka-ui:v1.0.0
+    container_name: kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ugc
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8081:8080"
+    depends_on:
+      kafka-0:
+        condition: service_healthy
+    networks:
+      - movies_net
+
+  # --- Аналитическое хранилище: ClickHouse, 2 шарда x 2 реплики -------------
+  #
+  # Keeper поднимается первым: без кворума координации не работают ни
+  # реплицируемые таблицы, ни ON CLUSTER-DDL, поэтому серверы ждут его healthy.
+  clickhouse-keeper-01:
+    <<: *clickhouse-keeper
+    container_name: clickhouse-keeper-01
+    volumes:
+      - ./clickhouse/keeper/keeper-01.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - ch_keeper_01_data:/var/lib/clickhouse-keeper
+
+  clickhouse-keeper-02:
+    <<: *clickhouse-keeper
+    container_name: clickhouse-keeper-02
+    volumes:
+      - ./clickhouse/keeper/keeper-02.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - ch_keeper_02_data:/var/lib/clickhouse-keeper
+
+  clickhouse-keeper-03:
+    <<: *clickhouse-keeper
+    container_name: clickhouse-keeper-03
+    volumes:
+      - ./clickhouse/keeper/keeper-03.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - ch_keeper_03_data:/var/lib/clickhouse-keeper
+
+  # Шард 1, реплика 1. Единственный узел с published-портами по умолчанию —
+  # через него удобно ходить clickhouse-client'ом с хоста.
+  clickhouse-01:
+    <<: *clickhouse-server
+    container_name: clickhouse-01
+    volumes:
+      - ./clickhouse/config/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
+      - ./clickhouse/config/limits.xml:/etc/clickhouse-server/config.d/limits.xml:ro
+      - ./clickhouse/config/macros/clickhouse-01.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/config/users.d/etl.xml:/etc/clickhouse-server/users.d/etl.xml:ro
+      - ch_01_data:/var/lib/clickhouse
+    ports:
+      - "8123:8123"   # HTTP
+      - "9010:9000"   # native (9000 на хосте занят слишком часто, поэтому 9010)
+
+  clickhouse-02:
+    <<: *clickhouse-server
+    container_name: clickhouse-02
+    volumes:
+      - ./clickhouse/config/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
+      - ./clickhouse/config/limits.xml:/etc/clickhouse-server/config.d/limits.xml:ro
+      - ./clickhouse/config/macros/clickhouse-02.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/config/users.d/etl.xml:/etc/clickhouse-server/users.d/etl.xml:ro
+      - ch_02_data:/var/lib/clickhouse
+    ports:
+      - "8124:8123"
+      - "9011:9000"
+
+  clickhouse-03:
+    <<: *clickhouse-server
+    container_name: clickhouse-03
+    volumes:
+      - ./clickhouse/config/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
+      - ./clickhouse/config/limits.xml:/etc/clickhouse-server/config.d/limits.xml:ro
+      - ./clickhouse/config/macros/clickhouse-03.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/config/users.d/etl.xml:/etc/clickhouse-server/users.d/etl.xml:ro
+      - ch_03_data:/var/lib/clickhouse
+    ports:
+      - "8125:8123"
+      - "9012:9000"
+
+  clickhouse-04:
+    <<: *clickhouse-server
+    container_name: clickhouse-04
+    volumes:
+      - ./clickhouse/config/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
+      - ./clickhouse/config/limits.xml:/etc/clickhouse-server/config.d/limits.xml:ro
+      - ./clickhouse/config/macros/clickhouse-04.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/config/users.d/etl.xml:/etc/clickhouse-server/users.d/etl.xml:ro
+      - ch_04_data:/var/lib/clickhouse
+    ports:
+      - "8126:8123"
+      - "9013:9000"
+
+  # Одноразовое применение DDL — по образцу kafka-init и auth-migrations.
+  # Идемпотентно (IF NOT EXISTS в каждом операторе), поэтому безопасно
+  # выполняется при каждом подъёме стека.
+  clickhouse-init:
+    image: clickhouse/clickhouse-server:25.3
+    container_name: clickhouse-init
+    depends_on:
+      clickhouse-01:
+        condition: service_healthy
+      clickhouse-02:
+        condition: service_healthy
+      clickhouse-03:
+        condition: service_healthy
+      clickhouse-04:
+        condition: service_healthy
+    environment:
+      CH_INIT_HOST: clickhouse-01
+      CH_CLUSTER: ${CH_CLUSTER:-ugc_cluster}
+      CH_DATABASE: ${CH_DATABASE:-ugc}
+      CH_USER: ${CH_USER:-etl}
+      CH_PASSWORD: ${CH_PASSWORD:-etl}
+      CH_EXPECTED_NODES: "4"
+    volumes:
+      - ./etl_clickhouse/ddl:/ddl:ro
+      - ./etl_clickhouse/scripts/apply_ddl.sh:/apply_ddl.sh:ro
+    entrypoint: ["/bin/bash", "/apply_ddl.sh"]
+    networks:
+      - movies_net
+
+  # --- Наблюдаемость: метрики и дашборды ------------------------------------
+  # Jaeger (выше) отвечает на вопрос «где время в одном запросе», Prometheus —
+  # на вопрос «как система живёт в целом», включая обязательный для спринта
+  # контроль памяти ETL при непрерывном потоке.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # Неделя истории: достаточно, чтобы увидеть форму кривой RSS на длинном
+      # прогоне, и не превращает локальный стенд в хранилище метрик.
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    networks:
+      - movies_net
+
+  grafana:
+    image: grafana/grafana:11.5.0
+    container_name: grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - movies_net
+
+  # --- Сервис сбора пользовательских действий ------------------------------
+  analytics-collector:
+    build:
+      context: .
+      dockerfile: analytics_collector/Dockerfile
+    container_name: analytics-collector
+    env_file:
+      - .env
+    environment:
+      OTEL_SERVICE_NAME: analytics-collector
+      # Собственные данные коллектора (буфер, rate limit, дедуп) — в отдельном
+      # экземпляре Redis. Денилист токенов остаётся в общем: его ведёт Auth, и
+      # читать его надо там, где он пишется (см. AUTH_REDIS_* ниже).
+      UGC_REDIS_HOST: redis-ugc
+      UGC_REDIS_DB: "0"
+      AUTH_REDIS_HOST: redis
+      AUTH_REDIS_DB: "0"
+    expose:
+      - "8000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      redis-ugc:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    networks:
+      - movies_net
+
+  # ETL Kafka -> ClickHouse: переносит поток пользовательских действий в
+  # аналитическое хранилище. Не путать с сервисом `etl` ниже — тот про
+  # PostgreSQL -> Elasticsearch и к аналитике отношения не имеет.
+  etl-clickhouse:
+    build:
+      context: .
+      dockerfile: etl_clickhouse/Dockerfile
+    container_name: etl-clickhouse
+    env_file:
+      - .env
+    environment:
+      OTEL_SERVICE_NAME: etl-clickhouse
+    ports:
+      # Публикуем метрики наружу: без них проверка «не течёт ли приложение»
+      # требовала бы заходить внутрь сети.
+      - "9101:8000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse-init:
+        condition: service_completed_successfully
+    networks:
+      - movies_net
+
+  etl:
+    build:
+      context: .
+      dockerfile: etl/Dockerfile
+    container_name: etl
+    env_file:
+      - .env
+    environment:
+      STATE_FILE_PATH: /var/lib/etl/etl_state.json
+    depends_on:
+      theatre-db:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - etl_state:/var/lib/etl
+    networks:
+      - movies_net
+
+  django-migrations:
+    build:
+      context: ./django_admin/app
+    container_name: django-migrations
+    env_file:
+      - .env
+    depends_on:
+      theatre-db:
+        condition: service_healthy
+    entrypoint: []
+    command: >
+      bash -c "python manage.py migrate --no-input
+      && python manage.py collectstatic --no-input
+      && (python manage.py createsuperuser --no-input || true)"
+    volumes:
+      - static_volume:/opt/app/static/
+    networks:
+      - movies_net
+
+  django-admin:
+    build:
+      context: ./django_admin/app
+    container_name: django-admin
+    env_file:
+      - .env
+    environment:
+      OTEL_SERVICE_NAME: django-admin
+    expose:
+      - "8000"
+    depends_on:
+      django-migrations:
+        condition: service_completed_successfully
+      jaeger:
+        condition: service_started
+    # Готовность именно приложения, а не контейнера: короткая форма depends_on
+    # у Nginx гарантировала только запуск процесса, поэтому сразу после
+    # `docker compose up` Nginx какое-то время отдавал 502.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/admin/login/', timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - static_volume:/opt/app/static/
+    networks:
+      - movies_net
+
+  nginx:
+    image: nginx:1.25.3
+    container_name: nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/configs:/etc/nginx/conf.d:ro
+      - static_volume:/data/static/
+    # Форма с condition, а не короткий список: короткая ждёт лишь СТАРТА
+    # контейнера, а не готовности приложения в нём. Auth добавлен в список
+    # явно — маршруты /api/v1/{auth,roles,users} ведут в него.
+    depends_on:
+      django-admin:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      analytics-collector:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    networks:
+      - movies_net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: api
+    env_file:
+      - .env
+    environment:
+      OTEL_SERVICE_NAME: movies-api
+    expose:
+      - "8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    # X-Request-Id обязателен для любого запроса (см. rest/core/request_id.py),
+    # поэтому проба шлёт заголовок — иначе она получала бы 400 и сервис никогда
+    # не становился бы healthy.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/api/openapi.json', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - movies_net
+
+  auth-db:
+    image: postgres:16
+    container_name: auth-db
+    environment:
+      POSTGRES_USER: ${AUTH_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${AUTH_POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    volumes:
+      - auth_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_POSTGRES_USER} -d ${AUTH_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - movies_net
+
+  # Единственное место, где собирается образ Auth. Сервис `auth` ниже
+  # переиспользует его по тегу: раньше `build` был объявлен в обоих сервисах, и
+  # `docker compose build` собирал один и тот же Dockerfile дважды.
+  # Порядок гарантирован зависимостью auth -> auth-migrations.
+  auth-migrations:
+    build:
+      context: .
+      dockerfile: auth/Dockerfile
+    image: ugc/auth:local
+    container_name: auth-migrations
+    env_file:
+      - .env
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head"
+    networks:
+      - movies_net
+
+  auth:
+    image: ugc/auth:local
+    container_name: auth
+    env_file:
+      - .env
+    environment:
+      OTEL_SERVICE_NAME: auth-service
+    expose:
+      - "8000"
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-migrations:
+        condition: service_completed_successfully
+      jaeger:
+        condition: service_started
+    # Как и у Movies API, проба обязана слать X-Request-Id: без заголовка
+    # middleware отвечает 400 (см. auth/src/core/request_id.py).
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/api/openapi.json', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - movies_net
+
+networks:
+  movies_net:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  redis_ugc_data:
+  esdata:
+  etl_state:
+  static_volume:
+  auth_pg_data:
+  kafka_0_data:
+  kafka_1_data:
+  kafka_2_data:
+  ch_01_data:
+  ch_02_data:
+  ch_03_data:
+  ch_04_data:
+  ch_keeper_01_data:
+  ch_keeper_02_data:
+  ch_keeper_03_data:
+  prometheus_data:
+  grafana_data:

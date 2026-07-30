@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+.venv
+.env
+.git
+.idea
+tests
+tasks
+sqlite_to_postgres
+schema_design
+CLAUDE.md

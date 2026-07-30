@@ -1,0 +1,31 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # Главная цель: метрики памяти ETL. process_resident_memory_bytes и
+  # etl_ch_allocated_blocks — то, по чему видно, течёт приложение или нет.
+  - job_name: etl-clickhouse
+    static_configs:
+      - targets: ['etl-clickhouse:8000']
+
+  - job_name: analytics-collector
+    static_configs:
+      - targets: ['analytics-collector:8000']
+
+  # Обе стороны конвейера нужны вместе: «данные не доехали» и «хранилище
+  # задыхается» выглядят одинаково, если видеть только ETL.
+  - job_name: clickhouse
+    static_configs:
+      - targets:
+          - 'clickhouse-01:9363'
+          - 'clickhouse-02:9363'
+          - 'clickhouse-03:9363'
+          - 'clickhouse-04:9363'
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

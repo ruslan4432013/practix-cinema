@@ -1,0 +1,24 @@
+<!--
+  Отдельный пользователь для ETL.
+
+  Писать под default нельзя по той же причине, по которой сервисы не ходят в
+  PostgreSQL под postgres: у ETL должна быть своя учётка, свои квоты и никакого
+  управления доступом (access_management=0). Пароль берётся из переменной
+  окружения контейнера, а не хранится в репозитории.
+
+  Для продакшена сюда добавляются TLS, ограничение <networks> подсетью и
+  read-only учётка для аналитиков — см. раздел «для продакшена» в README.
+-->
+<clickhouse>
+    <users>
+        <etl>
+            <password from_env="CH_PASSWORD"/>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>0</access_management>
+        </etl>
+    </users>
+</clickhouse>

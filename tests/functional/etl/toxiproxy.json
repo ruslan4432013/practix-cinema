@@ -1,0 +1,8 @@
+[
+  {
+    "name": "clickhouse",
+    "listen": "0.0.0.0:8123",
+    "upstream": "clickhouse:8123",
+    "enabled": true
+  }
+]

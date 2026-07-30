@@ -1,0 +1,40 @@
+# Прямые зависимости образа Auth-сервиса (он же образ набора
+# tests/functional/auth). Лок собирается отсюда с общими ограничениями:
+#   uv pip compile auth/requirements.in -c constraints.txt -o auth/requirements.txt --python-version 3.13
+
+# --- Веб-стек ---
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+
+# --- База данных ---
+sqlalchemy[asyncio]
+asyncpg
+alembic
+
+# --- Аутентификация и пароли ---
+async-fastapi-jwt-auth
+pwdlib[argon2,bcrypt]
+email-validator
+
+# --- Redis: денилист токенов, сессии, rate limit ---
+redis
+
+# --- OAuth и разбор User-Agent в истории входов ---
+httpx
+user-agents
+
+# --- CLI (createsuperuser) ---
+typer
+
+# --- Трассировка ---
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+opentelemetry-instrumentation-fastapi
+
+# --- Тесты ---
+# В образе, а не `pip install` в entrypoint: раньше набор auth ставил pytest
+# без закрепления версий, то есть каждый прогон мог получить другую.
+pytest
+pytest-asyncio

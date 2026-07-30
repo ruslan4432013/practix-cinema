@@ -1,0 +1,32 @@
+# Локальный прогон тех же проверок, что и в CI: ошибка форматирования должна
+# ловиться до пуша, а не в pull request'е.
+#
+#   pip install pre-commit && pre-commit install
+#   pre-commit run --all-files
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.2
+    hooks:
+      - id: ruff
+        name: ruff (линтер)
+        args: [--fix]
+      - id: ruff-format
+        name: ruff (форматтер)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+        # Compose-файлы содержат YAML-якоря (x-clickhouse-server и т. п.),
+        # многодокументную проверку для них включать не нужно.
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: detect-private-key
+      # Дубль корневого .env в рабочей копии — самая частая причина утечки
+      # секретов из этого репозитория.
+      - id: check-case-conflict

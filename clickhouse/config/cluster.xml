@@ -1,0 +1,88 @@
+<!--
+  Топология аналитического хранилища: 2 шарда по 2 реплики.
+
+  Шардирование даёт горизонтальное масштабирование объёма и скорости счёта,
+  репликация — переживание отказа узла без потери данных. Задание требует
+  устойчивости хранилища к сбоям, и одно без другого её не даёт: шардирование
+  без реплик увеличивает вероятность отказа вдвое, реплики без шардов не
+  масштабируют объём.
+
+  Файл общий для всех четырёх узлов; различает их только macros.xml.
+-->
+<clickhouse>
+    <remote_servers>
+        <ugc_cluster>
+            <!--
+              internal_replication=true — обязательно.
+
+              При true запись в Distributed уходит на ОДНУ реплику шарда, а
+              дальше её разносит сам ReplicatedMergeTree через Keeper.
+              При false Distributed сам пишет в обе реплики, минуя механизм
+              дедупликации блоков, — и каждая вставка гарантированно
+              задваивается. Это самая частая ошибка в конфигурации кластера.
+            -->
+            <!--
+              У каждой реплики обязательно указаны <user>/<password>: под ними
+              Distributed-таблица ходит на УДАЛЁННЫЕ шарды. Без них используется
+              default с пустым паролем, а официальный образ отключает сетевой
+              доступ для default, когда пароль не задан, — и любой межшардовый
+              запрос падает с AUTHENTICATION_FAILED. На одноузловом стенде это
+              незаметно: там Distributed читает и пишет локально, без сети.
+            -->
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>clickhouse-01</host>
+                    <port>9000</port>
+                    <user>etl</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+                <replica>
+                    <host>clickhouse-02</host>
+                    <port>9000</port>
+                    <user>etl</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+            </shard>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>clickhouse-03</host>
+                    <port>9000</port>
+                    <user>etl</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+                <replica>
+                    <host>clickhouse-04</host>
+                    <port>9000</port>
+                    <user>etl</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+            </shard>
+        </ugc_cluster>
+    </remote_servers>
+
+    <!--
+      Координация репликации и очередь ON CLUSTER-DDL. Секция исторически
+      называется <zookeeper>, но указывает на ClickHouse Keeper — совместимый
+      по протоколу и не требующий JVM.
+    -->
+    <zookeeper>
+        <node>
+            <host>clickhouse-keeper-01</host>
+            <port>9181</port>
+        </node>
+        <node>
+            <host>clickhouse-keeper-02</host>
+            <port>9181</port>
+        </node>
+        <node>
+            <host>clickhouse-keeper-03</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+</clickhouse>

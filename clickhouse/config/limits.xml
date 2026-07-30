@@ -1,0 +1,21 @@
+<!--
+  Ограничения для локального стенда.
+
+  По умолчанию ClickHouse рассчитывает на выделенную машину и забирает до 90 %
+  RAM под запросы и кеши. Четыре таких сервера в docker-compose рядом с Kafka,
+  Elasticsearch и двумя PostgreSQL выжимают ноутбук в своп, и первым, что
+  «сломается», окажется вовсе не ClickHouse.
+
+  Для продакшена этот файл не нужен — там у сервера своя машина.
+-->
+<clickhouse>
+    <max_server_memory_usage_to_ram_ratio>0.25</max_server_memory_usage_to_ram_ratio>
+    <mark_cache_size>268435456</mark_cache_size>
+    <!-- Несжатый кеш бесполезен на аналитических full-scan-запросах: данные
+         почти не переиспользуются, а память он занимает постоянно. -->
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+    <max_concurrent_queries>50</max_concurrent_queries>
+    <logger>
+        <level>information</level>
+    </logger>
+</clickhouse>

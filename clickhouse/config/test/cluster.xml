@@ -1,0 +1,28 @@
+<!--
+  Тестовый стенд: тот же кластер ugc_cluster, но из одного шарда с одной
+  репликой.
+
+  Имя кластера намеренно совпадает с боевым. Благодаря этому и макросу
+  {cluster} в DDL один и тот же набор файлов etl_clickhouse/ddl/*.sql
+  применяется к обоим стендам без изменений. Второй набор DDL «для тестов»
+  неизбежно разъехался бы с боевым, и тесты перестали бы что-либо доказывать.
+-->
+<clickhouse>
+    <remote_servers>
+        <ugc_cluster>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>clickhouse</host>
+                    <port>9000</port>
+                    <!-- Здесь сетевого обращения не происходит (Distributed
+                         читает и пишет локально), но учётка указана для
+                         паритета с боевой конфигурацией: иначе тестовый стенд
+                         не поймал бы ошибку, которая ломает только кластер. -->
+                    <user>etl</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+            </shard>
+        </ugc_cluster>
+    </remote_servers>
+</clickhouse>

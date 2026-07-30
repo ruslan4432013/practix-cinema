@@ -1,0 +1,92 @@
+[project]
+name = "async-api-sprint-1"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "elasticsearch[async]>=9.4.0",
+    "fastapi>=0.136.1",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.0.0",
+    "redis>=7.4.0",
+    "uvicorn>=0.47.0",
+]
+
+# --- Линтер и форматтер -----------------------------------------------------
+# Один конфиг на весь монорепозиторий: сервисы деплоятся независимо, но правила
+# оформления должны быть общими, иначе спор о кавычках съедает код-ревью.
+# Запуск: `ruff check .` и `ruff format .` (или через pre-commit).
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-exclude = [
+    ".venv",
+    "**/migrations/versions/**",    # автогенерация Alembic
+    "**/django_admin/app/*/migrations/**",
+    "sqlite_to_postgres",
+    "schema_design",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort — порядок импортов
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "T20",  # flake8-print — print() вместо логгера
+    "BLE",  # flake8-blind-except — `except Exception` только осознанно, через noqa
+    "RUF",
+]
+ignore = [
+    # Длина строки контролируется форматтером; отдельная ошибка на неё лишь
+    # шумит на длинных URL и русских комментариях.
+    "E501",
+    # Аргументы по умолчанию через Depends()/Body() — идиома FastAPI.
+    "B008",
+    # Кириллица в строках и комментариях — здесь это норма, а не гомоглиф-атака.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Скрипты ожидания сервисов печатают в stdout намеренно: их читает человек,
+# смотрящий на вывод docker compose, а не система сбора логов.
+"tests/functional/utils/*.py" = ["T20"]
+"seed_db.py" = ["T20"]
+# В CLI печать — это и есть пользовательский интерфейс.
+"auth/src/cli.py" = ["T20"]
+# Alembic импортирует модели ради побочного эффекта — регистрации в metadata.
+# Удаление «неиспользуемого» импорта сломало бы autogenerate.
+"auth/migrations/env.py" = ["F401"]
+# Набор auth правит sys.path до импортов приложения: PYTHONPATH внутри
+# контейнера указывает на другой корень, чем при локальном запуске.
+"tests/functional/auth/conftest.py" = ["E402"]
+# Django: атрибуты Meta и списки полей — часть фреймворка, а не изменяемые
+# значения по умолчанию в смысле RUF012.
+"django_admin/**" = ["RUF012"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["api", "core", "db", "models", "services", "brokers", "pipeline", "sinks", "transform", "observability", "gears", "lib"]
+
+[tool.ruff.format]
+# Одинарные кавычки — доминирующий стиль в rest/ и в новых сервисах.
+quote-style = "single"
+docstring-code-format = true
+
+# --- Типы -------------------------------------------------------------------
+# mypy включён точечно: строки таблиц ClickHouse собираются кортежами, и
+# несовпадение порядка колонок с DDL — ровно та ошибка, которую типы ловят
+# статически, а тесты — только на живом хранилище.
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+files = ["etl_clickhouse/src", "analytics_collector/src"]

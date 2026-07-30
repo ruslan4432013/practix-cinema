@@ -1,0 +1,13 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # uid зафиксирован: панели дашборда ссылаются на источник по нему, а
+    # сгенерированный uid менялся бы при каждом пересоздании тома Grafana, и
+    # дашборд открывался бы пустым.
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
