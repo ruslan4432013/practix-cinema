@@ -1,0 +1,43 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "auth",
+  "projectType": "application",
+  "sourceRoot": "apps/auth/src",
+  "tags": [
+    "lang:python",
+    "scope:auth",
+    "type:app"
+  ],
+  "targets": {
+    "lint": {},
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target auth --build-arg PACKAGE=practix-auth --load -t practix/auth:local ."
+      }
+    },
+    "test-functional": {
+      "inputs": [
+        "python",
+        "pythonTests",
+        "^python",
+        "sharedGlobals",
+        "{workspaceRoot}/infra/compose/**",
+        "{workspaceRoot}/infra/docker/**"
+      ],
+      "options": {
+        "commands": [
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose run --rm --build auth-tests",
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose down -v"
+        ]
+      }
+    },
+    "migrate": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "cwd": "{workspaceRoot}",
+        "command": "uv run --package practix-auth alembic -c apps/auth/alembic.ini upgrade head"
+      }
+    }
+  }
+}

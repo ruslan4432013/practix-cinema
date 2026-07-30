@@ -1,6 +1,6 @@
 # 🎬 Async API — Онлайн-кинотеатр
 
-Асинхронная платформа онлайн-кинотеатра: read-only API поиска фильмов, сервис авторизации с JWT и ролями, админка Django, ETL-конвейер и полная observability-обвязка. Монорепозиторий поднимается одним `docker-compose.yml` в bridge-сети `movies_net` за Nginx. Python 3.13 во всех сервисах.
+Асинхронная платформа онлайн-кинотеатра: read-only API поиска фильмов, сервис авторизации с JWT и ролями, админка Django, ETL-конвейер и полная observability-обвязка. **Nx-монорепозиторий**: сервисы в `apps/`, общий код в `libs/`, инфраструктура в `infra/`. Стенд поднимается одним `infra/compose/docker-compose.yml` в bridge-сети `movies_net` за Nginx. Python 3.13 (админка Django — 3.12). Устройство репозитория и принятые решения — в [`docs/monorepo.md`](docs/monorepo.md).
 
 [Ссылка на репозиторий](https://github.com/ruslan4432013/ugc_sprint_1)
 
@@ -76,15 +76,25 @@ Analytics Collector проверяет JWT **локально** общим се�
 
 ### Сервисы и порты
 
-| Сервис | Путь / образ | Роль | Порт (контейнер) | `OTEL_SERVICE_NAME` |
-|--------|--------------|------|------------------|---------------------|
-| **Movies API** (`api`) | `Dockerfile` (root) | Read-only films/genres/persons API (ASGI, 8 uvicorn workers) | expose 8000 | `movies-api` |
-| **Auth** (`auth`) | `auth/Dockerfile` | Пользователи, роли, JWT-сессии | expose 8000 | `auth-service` |
-| **Django Admin** (`django-admin`) | `django_admin/app/` | Админка + внутренний content API | expose 8000 | `django-admin` |
-| **Analytics Collector** (`analytics-collector`) | `analytics_collector/Dockerfile` | Сбор пользовательских действий → Kafka (4 uvicorn workers) | expose 8000 | `analytics-collector` |
-| **ETL ClickHouse** (`etl-clickhouse`) | `etl_clickhouse/Dockerfile` | Конвейер Kafka → ClickHouse (аналитическое хранилище) | host `9101` → 8000 (`/metrics`) | `etl-clickhouse` |
-| **ETL** (`etl`) | `etl/` | Конвейер PostgreSQL → Elasticsearch (не путать с предыдущим) | — | — |
-| **Nginx** (`nginx`) | `nginx:1.25.3` | Reverse proxy / балансировщик, точка входа | published **80** | — |
+| Сервис | Путь | Дистрибутив | Роль | Порт | `OTEL_SERVICE_NAME` |
+|--------|------|-------------|------|------|---------------------|
+| **Movies API** (`api`) | `apps/movies-api/` | `practix-movies-api` | Read-only films/genres/persons API (8 uvicorn workers) | expose 8000 | `movies-api` |
+| **Auth** (`auth`) | `apps/auth/` | `practix-auth` | Пользователи, роли, JWT-сессии, OAuth | expose 8000 | `auth-service` |
+| **Django Admin** (`django-admin`) | `apps/django-admin/` | вне workspace (Python 3.12) | Админка + внутренний content API | expose 8000 | `django-admin` |
+| **Analytics Collector** | `apps/analytics-collector/` | `practix-analytics-collector` | Сбор пользовательских действий → Kafka (4 uvicorn workers) | expose 8000 | `analytics-collector` |
+| **ETL ClickHouse** | `apps/etl-clickhouse/` | `practix-etl-clickhouse` | Конвейер Kafka → ClickHouse | host `9101` → 8000 (`/metrics`) | `etl-clickhouse` |
+| **ETL Elasticsearch** (`etl`) | `apps/etl-elasticsearch/` | `practix-etl-elasticsearch` | Конвейер PostgreSQL → Elasticsearch (не путать с предыдущим) | — | — |
+| **Nginx** (`nginx`) | `infra/nginx/` | `nginx:1.25.3` | Reverse proxy / балансировщик, точка входа | published **80** | — |
+
+Все пять Python-сервисов собираются ОДНИМ `infra/docker/python-service.Dockerfile`
+(пять `--target`). У админки Django свой Dockerfile: она на Python 3.12, вне
+общего uv workspace и со своим `uv.lock`.
+
+Общий код — библиотеки в `libs/`: `practix-core` (логирование, request-id,
+трассировка, backoff, обвязка JWT, определение IP клиента, пагинация),
+`practix-contracts` (словарь событий и топиков, версионируется каталогами),
+`practix-search-schema` (схемы индексов Elasticsearch), `practix-testing`
+(фикстуры и скрипты ожидания сервисов).
 
 ### Хранилища и инфраструктура
 
@@ -154,7 +164,7 @@ Auth-сервис применяет **fixed-window** ограничитель �
 
 ## Возможности спринта 3: сбор пользовательских действий (UGC)
 
-Сервис [`analytics_collector/`](analytics_collector/README.md) — аналог Яндекс.Метрики для кинотеатра. Принимает клики, просмотры страниц (с временем на них) и кастомные события (смена качества видео, досмотр до конца, использование фильтров поиска) и публикует их в Kafka.
+Сервис [`apps/analytics-collector/`](apps/analytics-collector/README.md) — аналог Яндекс.Метрики для кинотеатра. Принимает клики, просмотры страниц (с временем на них) и кастомные события (смена качества видео, досмотр до конца, использование фильтров поиска) и публикует их в Kafka.
 
 **Топики** — по одному на семейство событий (стратегия «топик на тип сущности»): `ugc.clicks.v1`, `ugc.page_views.v1`, `ugc.video_events.v1`, `ugc.video_progress.v1`, `ugc.search_events.v1` плюс `ugc.events.dlq.v1`. Все с RF=3 и `min.insync.replicas=2`, создаются одноразовой задачей `kafka-init`. **Ключ партиционирования** — `user_id` (для анонимов `anonymous_id` → `session_id`): сохраняет порядок событий одного пользователя и даёт равномерное распределение.
 
@@ -164,7 +174,7 @@ Auth-сервис применяет **fixed-window** ограничитель �
 
 **Отличия от Auth и Movies API — осознанные:** `X-Request-Id` здесь *генерируется*, а не требуется (400 сломал бы `navigator.sendBeacon`, который не умеет ставить заголовки); лимит частоты выше и учитывает вес пачки; документация висит на `/api/analytics/openapi`, потому что `/api/openapi` за Nginx уже занят Movies API.
 
-Подробнее: [требования](analytics_collector/docs/requirements.md) · [архитектура и диаграммы](analytics_collector/docs/architecture.md) · [топики](analytics_collector/docs/kafka_topics.md) · [клиентский трекер](analytics_collector/docs/client_snippet.md).
+Подробнее: [требования](apps/analytics-collector/docs/requirements.md) · [архитектура и диаграммы](apps/analytics-collector/docs/architecture.md) · [топики](apps/analytics-collector/docs/kafka_topics.md) · [клиентский трекер](apps/analytics-collector/docs/client_snippet.md).
 
 ---
 
@@ -172,7 +182,7 @@ Auth-сервис применяет **fixed-window** ограничитель �
 
 Поток событий заканчивался ничем: Kafka — транспорт, а не архив (retention
 7–30 дней), и ответить на продуктовые вопросы было нечем. Сервис
-[`etl_clickhouse/`](etl_clickhouse/README.md) непрерывно переносит события в
+[`apps/etl-clickhouse/`](apps/etl-clickhouse/README.md) непрерывно переносит события в
 ClickHouse и закрывает конвейер.
 
 ### Хранилище
@@ -183,7 +193,7 @@ ClickHouse и закрывает конвейер.
 останавливает все вставки в реплицируемые таблицы и любой `ON CLUSTER`-DDL, и
 «две реплики на шард» перестают что-либо значить.
 
-Схема (DDL в `etl_clickhouse/ddl/`, применяет одноразовый `clickhouse-init`):
+Схема (DDL в `apps/etl-clickhouse/ddl/`, применяет одноразовый `clickhouse-init`):
 
 | Таблица | Что содержит |
 |---|---|
@@ -237,7 +247,7 @@ Prometheus собирает их вместе с метриками коллек
 Grafana рисует дашборд «UGC ETL → ClickHouse», алерт `EtlMemoryGrowth` срабатывает
 на устойчиво положительную производную RSS за три часа.
 
-Подробнее: [ETL](etl_clickhouse/README.md) · [схема хранилища и запросы аналитика](etl_clickhouse/docs/analytics_schema.md) · [матрица отказов](etl_clickhouse/docs/reliability.md).
+Подробнее: [ETL](apps/etl-clickhouse/README.md) · [схема хранилища и запросы аналитика](apps/etl-clickhouse/docs/analytics_schema.md) · [матрица отказов](apps/etl-clickhouse/docs/reliability.md).
 
 ---
 
@@ -420,63 +430,95 @@ docker compose exec clickhouse-01 clickhouse-client --user etl --password etl \
 
 ## Качество кода
 
-Единый конфиг `ruff` (линтер + форматтер) на весь монорепозиторий лежит в
-`pyproject.toml`, версии зависимостей — в корневом `constraints.txt`.
+Единый конфиг `ruff` (линтер + форматтер) на весь монорепозиторий — в
+`pyproject.toml`. Версии инструментов закреплены в ОДНОМ месте,
+`[dependency-groups] dev` того же файла: раньше версия `ruff` была пришпилена в
+двух местах (CI и pre-commit), а в самом репозитории — нигде.
 
 ```bash
-ruff check .          # линтер
-ruff format .         # форматтер
-pre-commit install    # те же проверки перед коммитом
+uv run ruff check . && uv run ruff format .   # напрямую
+npx nx run-many -t lint                        # то же, по проектам, с кешем
+npx nx affected -t lint typecheck test         # только затронутое
+pre-commit install                             # те же проверки перед коммитом
 ```
 
-CI (`.github/workflows/ci.yml`) на каждый pull request прогоняет линтер,
-форматтер, юнит-тесты и четыре функциональных набора параллельно.
+`mypy` включён на все библиотеки `libs/` и проходит строго. Приложения
+подключаются по одному отдельными задачами: конфиг `mypy` существовал и раньше,
+но не запускался ни в CI, ни в pre-commit, и под ним накопилось 10 ошибок типов.
+
+### Дублирование кода
+
+Гейт против регресса — `jscpd`, порог в `.jscpd.json`:
+
+```bash
+npm run dup
+```
+
+Порог держится чуть выше фактического уровня и снижается по мере извлечения
+общего кода (5 % → 2 % за время переезда на монорепозиторий; фактический уровень
+— 1.70 % против 4.53 % изначально). История измерений, список извлечённых
+кластеров и — что важнее — список дублирований, оставленных ОСОЗНАННО, в
+[`docs/monorepo.md`](docs/monorepo.md).
+
+### Проверки целостности
+
+Три проверки, каждая закрывает конкретный способ тихо всё сломать:
+
+```bash
+uv lock --check                                 # устаревший лок удаляет рёбра графа
+uv run python tools/check_docker_manifests.py    # список COPY в Dockerfile vs члены workspace
+npx nx graph --file=/tmp/g.json && uv run python tools/check_graph_edges.py /tmp/g.json
+```
+
+CI (`.github/workflows/ci.yml`) прогоняет их ДО `nx affected` — иначе изменение
+библиотеки может уехать непротестированным.
 
 ---
 
 ## Тестирование
 
-Тесты делятся на два вида:
+Наборы лежат рядом со своими приложениями: `apps/<сервис>/tests/`.
 
-* **юнит-тесты** (`tests/unit/`) — чистые функции без инфраструктуры: разбор
-  User-Agent, хеширование IP, выбор ключа партиционирования, соответствие типа
-  события топику, валидаторы DTO. Миллисекунды вместо десятков секунд;
-* **функциональные/интеграционные** (`tests/functional/`) — против реальных
-  ES / Redis / Postgres / Kafka / ClickHouse в Docker Compose.
-
-```bash
-docker compose -f tests/functional/docker-compose.yml \
-               --project-directory tests/functional \
-               up --build --abort-on-container-exit --exit-code-from tests
-```
-
-Набор тестов сервиса сбора событий запускается отдельно (он поднимает свой брокер Kafka):
+* **юнит-тесты** — чистые функции без инфраструктуры: разбор User-Agent,
+  хеширование IP, выбор ключа партиционирования, соответствие типа события
+  топику, валидаторы DTO. Миллисекунды вместо десятков секунд;
+* **тесты библиотек** (`libs/*/tests/`) — в том числе проверки эквивалентности:
+  извлечённый логгер сверяется построчно с дословной копией прежней реализации, а
+  кривая задержки backoff — с прежней формулой;
+* **функциональные** — против реальных ES / Redis / Postgres / Kafka /
+  ClickHouse в Docker Compose.
 
 ```bash
-docker compose -f tests/functional/docker-compose.yml \
-               --project-directory tests/functional run --rm --build ugc-tests
+npx nx run-many -t test               # юнит-тесты и тесты библиотек
+npx nx affected -t test               # только затронутое
+
+# Функциональные наборы — ПО ОДНОМУ (цель сама делает down -v после прогона)
+npx nx run movies-api:test-functional
+npx nx run auth:test-functional
+npx nx run analytics-collector:test-functional
+npx nx run etl-clickhouse:test-functional
 ```
 
-Набор тестов ETL (поднимает Kafka, одноузловой ClickHouse со встроенным Keeper,
-toxiproxy и сам ETL):
+> Наборы гоняются **по очереди на чистом стенде**. Тесты ETL намеренно кладут в
+> топики битые сообщения (проверка карантина), и без очистки томов они попадут в
+> выборку тестов коллектора. В CI матрица при этом остаётся параллельной: у
+> каждого раннера свой демон Docker.
 
-```bash
-docker compose -f tests/functional/docker-compose.yml \
-               --project-directory tests/functional run --rm --build etl-tests
-```
+Тесты запекаются в образ группой зависимостей `test`; прежний bind-mount всего
+репозитория (`../:/tests`) убран — из-за него набор прогонял код, которого в
+образе нет.
 
-> Наборы гоняются **по очереди на чистом стенде**: между запусками нужен
-> `docker compose -f tests/functional/docker-compose.yml --project-directory tests/functional down -v`.
-> Тесты ETL намеренно кладут в топики битые сообщения (проверка карантина), и
-> без очистки томов они попадут в выборку тестов коллектора.
->
-> Здесь `run --rm`, а не `up --abort-on-container-exit`: последний останавливает
-> весь стек, как только завершается **любой** контейнер, включая одноразовые
-> `kafka-init-test` и `clickhouse-init-test`.
+`asyncio_mode = auto` — async-тесты и фикстуры не требуют декоратора. Область
+event loop **разная у наборов, и это требование, а не недосмотр**: набору
+Movies API нужен сессионный цикл (у него сессионные фикстуры ES/Redis/HTTP),
+наборам Auth/UGC/ETL — функциональный (их фикстуры пересоздают движки и клиенты
+на каждый тест). Поэтому **нельзя добавлять `[tool.pytest.ini_options]` в
+корневой `pyproject.toml`**: он станет родительским конфигом и молча вернёт
+сессионный цикл, сломав три набора.
 
-`asyncio_mode = auto` (pytest-asyncio) — async-тесты и фикстуры не требуют декоратора. Тесты Movies API ходят по HTTP (aiohttp); тесты Auth и Analytics Collector запускают приложение in-process через httpx `ASGITransport` — против реальных `auth-db` / Kafka + Redis соответственно.
-
-Подробности — в [`tests/functional/README.md`](tests/functional/README.md).
+Общие фикстуры и скрипты ожидания — библиотека `practix-testing`. Благодаря
+этому правка одной фикстуры выбирает в `nx affected` все четыре набора; до
+переезда эта связь была невидима ни одному инструменту.
 
 ### Нагрузочное тестирование
 

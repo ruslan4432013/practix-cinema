@@ -1,0 +1,38 @@
+[project]
+name = "practix-movies-api"
+version = "1.0.0"
+description = "Movies API: read-only поиск фильмов, жанров и персон (Elasticsearch + кэш в Redis)"
+requires-python = ">=3.13"
+dependencies = [
+    "practix-core[asgi,fastapi,otel,httpx,jwt]",
+    "fastapi>=0.137.1",
+    "uvicorn>=0.49.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "elasticsearch[async]>=9.4.0",
+    "redis>=8.0.0",
+    "async-fastapi-jwt-auth>=0.6.6",
+    "httpx>=0.28.1",
+]
+
+[dependency-groups]
+# Тесты живут в группе, а не в основных зависимостях: рантайм-образ собирается
+# без них (`uv sync --no-dev`), а тестовый — с `--group test`.
+test = [
+    "practix-testing[elasticsearch,redis,http]",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+    "aiohttp>=3.14.3",
+    "pyjwt>=2.10.1",
+]
+
+[project.scripts]
+# Точка входа вместо `uvicorn main:app --app-dir rest`.
+movies-api = "practix_movies_api.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/practix_movies_api"]

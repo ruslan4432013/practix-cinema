@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "etl-elasticsearch",
+  "projectType": "application",
+  "sourceRoot": "apps/etl-elasticsearch/src",
+  "tags": [
+    "lang:python",
+    "scope:movies",
+    "type:app"
+  ],
+  "targets": {
+    "lint": {},
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target etl-elasticsearch --build-arg PACKAGE=practix-etl-elasticsearch --load -t practix/etl-elasticsearch:local ."
+      }
+    }
+  }
+}

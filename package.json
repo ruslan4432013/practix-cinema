@@ -1,0 +1,19 @@
+{
+  "name": "practix-cinema",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "npm@11.6.0",
+  "description": "Nx task orchestration for the practix-cinema Python monorepo. Node is a build-tool dependency only: no service ships JavaScript.",
+  "scripts": {
+    "lint": "nx run-many -t lint",
+    "test": "nx run-many -t test",
+    "graph": "nx graph",
+    "dup": "jscpd --config .jscpd.json ."
+  },
+  "devDependencies": {
+    "@nx/devkit": "23.1.0",
+    "@nxlv/python": "23.0.0",
+    "jscpd": "5.0.14",
+    "nx": "23.1.0"
+  }
+}

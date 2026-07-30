@@ -1,0 +1,24 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "search-schema",
+  "projectType": "library",
+  "sourceRoot": "libs/search-schema/src",
+  "tags": [
+    "lang:python",
+    "scope:movies",
+    "type:lib"
+  ],
+  "targets": {
+    "lint": {},
+    "test": {
+      "options": {
+        "command": "uv run --no-project --python 3.13 --with pytest --with-editable libs/search-schema pytest libs/search-schema/tests -v"
+      }
+    },
+    "typecheck": {
+      "options": {
+        "command": "uv run --with mypy mypy libs/search-schema/src"
+      }
+    }
+  }
+}

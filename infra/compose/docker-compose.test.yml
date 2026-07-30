@@ -1,0 +1,370 @@
+services:
+  elasticsearch:
+    image: elasticsearch:9.4.1
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Redis наборов rest и auth: кэш Movies API, денилист и сессии Auth.
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Отдельный экземпляр под набор ugc — как в боевом compose (redis-ugc).
+  # Раньше наборы делили один контейнер, разведённые лишь номером базы
+  # (UGC_REDIS_DB=1 против 0). Это работало, но держалось на том, что никто не
+  # напишет `flushall` вместо `flushdb`: при параллельном прогоне в CI такая
+  # правка выглядела бы как случайное падение чужого набора.
+  redis-ugc:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  fastapi:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: movies-api
+      args:
+        PACKAGE: practix-movies-api
+        UV_GROUPS: --group test
+    image: practix/movies-api:test
+    environment:
+      - ELASTIC_HOST=elasticsearch
+      - ELASTIC_PORT=9200
+      - ELASTIC_SCHEMA=http://
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Трассировка выключена: Jaeger в тестовом стеке нет, а экспортёр иначе
+      # засоряет вывод повторами неудачных отправок спанов.
+      - OTEL_ENABLED=False
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # X-Request-Id обязателен для КАЖДОГО запроса (rest/core/request_id.py
+    # отвечает 400 без него), поэтому проба обязана его слать. Без заголовка
+    # контейнер никогда не становился healthy, и набор падал ещё до первого
+    # теста: "dependency failed to start: container ... is unhealthy".
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request as u,sys; r=u.Request('http://localhost:8000/api/openapi.json', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  tests:
+    image: practix/movies-api:test
+    environment:
+      # Кеш pytest пишется в рабочий каталог, принадлежащий appuser. Раньше из-за
+      # этого два тестовых сервиса запускались от root; отключение кеша решает
+      # задачу без повышения прав.
+      - PYTEST_ADDOPTS=-p no:cacheprovider
+      - ES_HOST=http://elasticsearch:9200
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - SERVICE_URL=http://fastapi:8000
+      # Трассировка выключена: Jaeger в тестовом стеке нет, а экспортёр иначе
+      # засоряет вывод повторами неудачных отправок спанов.
+      - OTEL_ENABLED=False
+    depends_on:
+      fastapi:
+        condition: service_healthy
+    # Никаких `pip install` в entrypoint: pytest и pytest-asyncio приезжают в
+    # образе (requirements.txt собран с корневым constraints.txt), поэтому все
+    # наборы гарантированно идут на одной версии раннера.
+    entrypoint: >
+      sh -c "python3 -m practix_testing.utils.wait_for_es
+      && python3 -m practix_testing.utils.wait_for_redis
+      && pytest /opt/app/apps/movies-api/tests/functional -v"
+
+  auth-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: auth_database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d auth_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  auth-tests:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: auth
+      args:
+        PACKAGE: practix-auth
+        UV_GROUPS: --group test
+    image: practix/auth:test
+    environment:
+      # Кеш pytest пишется в рабочий каталог, принадлежащий appuser. Раньше из-за
+      # этого два тестовых сервиса запускались от root; отключение кеша решает
+      # задачу без повышения прав.
+      - PYTEST_ADDOPTS=-p no:cacheprovider
+      - AUTH_POSTGRES_HOST=auth-db
+      - AUTH_POSTGRES_PORT=5432
+      - AUTH_POSTGRES_USER=postgres
+      - AUTH_POSTGRES_PASSWORD=secret
+      - AUTH_POSTGRES_DB=auth_database
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OAUTH_ENABLED=True
+      # Трассировка выключена: Jaeger в тестовом стеке нет, а экспортёр иначе
+      # засоряет вывод повторами неудачных отправок спанов.
+      - OTEL_ENABLED=False
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # ENTRYPOINT образа НЕ переопределяется, и это принципиально: entrypoint.sh
+    # создаёт .env из .env.example. Настройки Auth (в отличие от остальных
+    # сервисов) содержат поля без значений по умолчанию — PROJECT_NAME,
+    # JWT_SECRET_KEY, BASE_DIR, AUTHJWT_* и другие, — поэтому без .env импорт
+    # приложения падает с ValidationError ещё на сборе тестов. Сам .env в образ
+    # не попадает: он в .dockerignore.
+    #
+    # working_dir тоже не переопределяем: pydantic-settings ищет .env
+    # относительно текущего каталога, а entrypoint.sh кладёт его в WORKDIR
+    # образа (/opt/app/auth). Переменные из `environment` выше приоритетнее
+    # значений из файла, так что адреса БД и Redis остаются тестовыми.
+    #
+    # pytest и pytest-asyncio приезжают в образе (auth/requirements.txt собран
+    # с корневым constraints.txt) — раньше здесь стоял `pip install` без
+    # закрепления версий, то есть каждый прогон мог получить другой раннер.
+    command: ["pytest", "/opt/app/apps/auth/tests/functional", "-v"]
+
+  # Один брокер вместо трёх: тесты проверяют логику сервиса, а не
+  # отказоустойчивость кластера, и лишние два узла только замедляют прогон.
+  # Отсюда же RF=1 и min.insync.replicas=1 — с RF=3 на одном узле создание
+  # топиков просто не прошло бы.
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: 0
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  kafka-init-test:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      REPLICATION_FACTOR: "1"
+      MIN_INSYNC_REPLICAS: "1"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ../../apps/analytics-collector/scripts/create_topics.sh:/create_topics.sh:ro
+    entrypoint: ["/bin/bash", "/create_topics.sh"]
+
+  ugc-tests:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: analytics-collector
+      args:
+        PACKAGE: practix-analytics-collector
+        UV_GROUPS: --group test
+    image: practix/analytics-collector:test
+    environment:
+      # Кеш pytest пишется в рабочий каталог, принадлежащий appuser. Раньше из-за
+      # этого два тестовых сервиса запускались от root; отключение кеша решает
+      # задачу без повышения прав.
+      - PYTEST_ADDOPTS=-p no:cacheprovider
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # Собственные данные набора — в своём экземпляре Redis, денилист токенов
+      # (его ведёт Auth) — в общем, как и в боевом compose.
+      - UGC_REDIS_HOST=redis-ugc
+      - UGC_REDIS_DB=0
+      - AUTH_REDIS_HOST=redis
+      - AUTH_REDIS_DB=0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - UGC_ENV=test
+      # Трассировка выключена: Jaeger в тестовом стеке нет, а экспортёр иначе
+      # засоряет вывод повторами неудачных отправок спанов.
+      - OTEL_ENABLED=False
+      # Метрики в тестах ведёт один процесс — multiprocess-режим не нужен.
+      - PROMETHEUS_MULTIPROC_DIR=
+    depends_on:
+      kafka-init-test:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      redis-ugc:
+        condition: service_healthy
+    working_dir: /opt/app
+    # root нужен, чтобы pytest мог писать кеш в /opt/app (образ работает от
+    # непривилегированного appuser).
+    entrypoint: >
+      sh -c "python3 -m practix_testing.utils.wait_for_kafka
+      && pytest /opt/app/apps/analytics-collector/tests/functional -v"
+
+  # --- Стенд ETL Kafka -> ClickHouse ---------------------------------------
+  # Один узел ClickHouse со ВСТРОЕННЫМ Keeper. Встроенный — только здесь: в
+  # боевой топологии он падал бы вместе с сервером, но тестам он нужен, потому
+  # что без Keeper не работают ни Replicated*MergeTree, ни ON CLUSTER, а с ним
+  # применяются те же самые файлы etl_clickhouse/ddl/*.sql, что и на бою.
+  # Второй набор DDL «для тестов» неизбежно разъехался бы с боевым.
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    hostname: clickhouse
+    environment:
+      CH_PASSWORD: etl
+    volumes:
+      - ../clickhouse/config/test/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ../clickhouse/config/test/macros.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ../clickhouse/config/test/keeper-embedded.xml:/etc/clickhouse-server/config.d/keeper.xml:ro
+      - ../clickhouse/config/test/limits.xml:/etc/clickhouse-server/config.d/limits.xml:ro
+      - ../clickhouse/config/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
+      - ../clickhouse/config/users.d/etl.xml:/etc/clickhouse-server/users.d/etl.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  clickhouse-init-test:
+    image: clickhouse/clickhouse-server:25.3
+    environment:
+      CH_INIT_HOST: clickhouse
+      CH_CLUSTER: ugc_cluster
+      CH_DATABASE: ugc
+      CH_USER: etl
+      CH_PASSWORD: etl
+      # Единственное отличие от боевого запуска того же скрипта.
+      CH_EXPECTED_NODES: "1"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ../../apps/etl-clickhouse/ddl:/ddl:ro
+      - ../../apps/etl-clickhouse/scripts/apply_ddl.sh:/apply_ddl.sh:ro
+    entrypoint: ["/bin/bash", "/apply_ddl.sh"]
+
+  # Управляемый отказ хранилища для test_storage_outage.py. Прокси, а не
+  # `docker compose stop`: не нужен docker-сокет внутри контейнера тестов и
+  # нет зависимости от имени compose-проекта.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.11.0
+    command: ["-host", "0.0.0.0", "-config", "/config/toxiproxy.json"]
+    volumes:
+      - ../../apps/etl-clickhouse/tests/functional/toxiproxy.json:/config/toxiproxy.json:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  etl-clickhouse:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: etl-clickhouse
+      args:
+        PACKAGE: practix-etl-clickhouse
+        UV_GROUPS: --group test
+    image: practix/etl-clickhouse:test
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # ETL ходит в хранилище ЧЕРЕЗ прокси, а тесты — напрямую.
+      - CH_HOSTS=toxiproxy:8123
+      - CH_USER=etl
+      - CH_PASSWORD=etl
+      - CH_DATABASE=ugc
+      - ETL_CONSUMER_GROUP=ugc-clickhouse-etl-test
+      # Кворум 2 недостижим при единственной реплике — все вставки падали бы.
+      - CH_INSERT_QUORUM=0
+      # Пороги ниже боевых: тест не должен ждать по две секунды на каждый флаш.
+      - ETL_FLUSH_INTERVAL=1.0
+      - ETL_BATCH_MAX_ROWS=100
+      - CH_RETRY_MAX_DELAY=3.0
+      - CH_SEND_RECEIVE_TIMEOUT=10
+      # Тест проверяет, что метрики tracemalloc заполняются.
+      - ETL_TRACEMALLOC_ENABLED=True
+      - ETL_TRACEMALLOC_INTERVAL=10.0
+      # Jaeger в тестовом стеке нет, а экспортёр иначе засоряет вывод
+      # повторами неудачных отправок спанов (как в ugc-tests).
+      - OTEL_ENABLED=False
+      - LOG_JSON=False
+    depends_on:
+      kafka-init-test:
+        condition: service_completed_successfully
+      clickhouse-init-test:
+        condition: service_completed_successfully
+      toxiproxy:
+        condition: service_started
+
+  etl-tests:
+    image: practix/etl-clickhouse:test
+    environment:
+      # Кеш pytest пишется в рабочий каталог, принадлежащий appuser. Раньше из-за
+      # этого два тестовых сервиса запускались от root; отключение кеша решает
+      # задачу без повышения прав.
+      - PYTEST_ADDOPTS=-p no:cacheprovider
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # Напрямую, минуя toxiproxy: тест обязан видеть хранилище даже тогда,
+      # когда для ETL оно «сломано».
+      - CH_HOST=clickhouse
+      - CH_PORT=8123
+      - CH_USER=etl
+      - CH_PASSWORD=etl
+      - CH_DATABASE=ugc
+      # Настройки для ClickHouseSink, который тест поднимает сам
+      # (test_idempotency.py: падение между вставкой и коммитом). Адрес — тот
+      # же прямой, что и у клиента тестов; кворум 2 недостижим при единственной
+      # реплике, как и у самого ETL на этом стенде.
+      - CH_HOSTS=clickhouse:8123
+      - CH_INSERT_QUORUM=0
+      - ETL_CONSUMER_GROUP=ugc-clickhouse-etl-test
+      - ETL_METRICS_URL=http://etl-clickhouse:8000/metrics
+      - TOXIPROXY_URL=http://toxiproxy:8474
+    depends_on:
+      etl-clickhouse:
+        condition: service_healthy
+    working_dir: /opt/app
+    # Как и в ugc-tests: root нужен, чтобы pytest мог писать кеш в /opt/app.
+    entrypoint: >
+      sh -c "python3 -m practix_testing.utils.wait_for_kafka
+      && python3 -m practix_testing.utils.wait_for_clickhouse
+      && pytest /opt/app/apps/etl-clickhouse/tests/functional -v"

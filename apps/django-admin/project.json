@@ -1,0 +1,20 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "django-admin",
+  "projectType": "application",
+  "sourceRoot": "apps/django-admin",
+  "tags": [
+    "lang:python",
+    "scope:admin",
+    "type:app",
+    "runtime:py312"
+  ],
+  "targets": {
+    "lint": {},
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f apps/django-admin/Dockerfile --load -t practix/django-admin:local apps/django-admin"
+      }
+    }
+  }
+}

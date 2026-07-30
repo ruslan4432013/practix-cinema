@@ -1,0 +1,35 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "etl-clickhouse",
+  "projectType": "application",
+  "sourceRoot": "apps/etl-clickhouse/src",
+  "tags": [
+    "lang:python",
+    "scope:analytics",
+    "type:app"
+  ],
+  "targets": {
+    "lint": {},
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target etl-clickhouse --build-arg PACKAGE=practix-etl-clickhouse --load -t practix/etl-clickhouse:local ."
+      }
+    },
+    "test-functional": {
+      "inputs": [
+        "python",
+        "pythonTests",
+        "^python",
+        "sharedGlobals",
+        "{workspaceRoot}/infra/compose/**",
+        "{workspaceRoot}/infra/docker/**"
+      ],
+      "options": {
+        "commands": [
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose run --rm --build etl-tests",
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose down -v"
+        ]
+      }
+    }
+  }
+}

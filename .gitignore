@@ -90,3 +90,11 @@ cython_debug/
 CLAUDE.md
 .claude
 .jbeval
+
+# --- Nx / Node (инструменты сборки; ни один сервис не поставляет JavaScript) ---
+node_modules/
+.nx/cache/
+.nx/workspace-data/
+# Отчёты детектора дублей (jscpd), см. .jscpd.json
+.jscpd/
+.ruff_cache/

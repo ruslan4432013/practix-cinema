@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/kucherenko/jscpd/master/packages/jscpd/schema.json",
+  "pattern": "**/*.py",
+  "ignore": [
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/__pycache__/**",
+    "**/.nx/**",
+    "**/dist/**",
+    "apps/auth/migrations/versions/**",
+    "apps/django-admin/*/migrations/**",
+    "sqlite_to_postgres/**",
+    "schema_design/**"
+  ],
+  "minLines": 8,
+  "minTokens": 50,
+  "reporters": [
+    "console",
+    "json"
+  ],
+  "output": ".jscpd",
+  "absolute": false,
+  "gitignore": false,
+  "threshold": 1.5
+}

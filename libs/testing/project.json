@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "testing",
+  "projectType": "library",
+  "sourceRoot": "libs/testing/src",
+  "tags": [
+    "lang:python",
+    "scope:platform",
+    "type:lib"
+  ],
+  "targets": {
+    "lint": {},
+    "typecheck": {
+      "options": {
+        "command": "uv run --with mypy mypy libs/testing/src"
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+[project]
+name = "practix-django-admin"
+version = "1.0.0"
+description = "Django-админка контента и внутренний content API"
+# ВНЕ общего workspace и с ОТДЕЛЬНЫМ uv.lock — сознательно.
+#
+# uv workspace делит одно разрешение зависимостей и одну планку requires-python.
+# Добавление участника на 3.12 опустило бы планку всем пяти сервисам на 3.13 —
+# ради единственного сервиса, который от этого ничего не получает: общего
+# первопартийного кода у него с ними нет (см. docs/monorepo.md, раздел
+# «Что НЕ извлекаем»), а подъём на 3.13 — это отдельная работа с uwsgi, который
+# компилируется из исходников против libpcre2.
+#
+# Nx им по-прежнему управляет: цели в project.json просто указывают на этот
+# каталог. Цена — два лок-файла вместо одного, и это дешевле, чем один лок на 3.12.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Верхняя граница по мажору стоит СОЗНАТЕЛЬНО. Первый же `uv lock` без неё
+    # увёл Django с 5.2.9 на 6.0.7 — мажорный апгрейд на сервисе, у которого в
+    # репозитории НЕТ НИ ОДНОГО ТЕСТА. Проверить такой переход можно только
+    # руками, поэтому он должен быть отдельной осознанной задачей, а не побочным
+    # эффектом перевода на workspace.
+    "django>=5.2.9,<6",
+    "psycopg[binary]>=3.3.4",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.0",
+    "python-dotenv>=1.2.2",
+    "requests>=2.32.5",
+    "uwsgi>=2.0.30",
+    "opentelemetry-sdk>=1.43.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.43.0",
+    "opentelemetry-instrumentation-django>=0.64b0",
+    "opentelemetry-instrumentation-requests>=0.64b0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Проект — не библиотека: это Django-приложение с manage.py, а не устанавливаемый
+# пакет. Собирать колесо не нужно, поэтому сборка нацелена на пустой набор.
+[tool.hatch.build.targets.wheel]
+packages = ["example"]

@@ -1,0 +1,30 @@
+[project]
+name = "practix-etl-elasticsearch"
+version = "1.0.0"
+description = "ETL PostgreSQL -> Elasticsearch: наполнение поискового индекса Movies API"
+requires-python = ">=3.13"
+# До перехода на workspace у этого сервиса НЕ БЫЛО лока вообще: четыре версии
+# были захардкожены прямо в `pip install` внутри Dockerfile, а скопированные туда
+# pyproject.toml и uv.lock не использовались. Теперь зависимости объявлены здесь
+# и попадают в общий uv.lock, как у остальных сервисов.
+dependencies = [
+    "practix-core",
+    "practix-search-schema",
+    "elasticsearch>=9.4.0",
+    "psycopg[binary]>=3.3.4",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+]
+
+[dependency-groups]
+test = ["pytest>=9.1.0"]
+
+[project.scripts]
+etl-elasticsearch = "practix_etl_elasticsearch.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/practix_etl_elasticsearch"]

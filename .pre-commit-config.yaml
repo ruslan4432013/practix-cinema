@@ -1,32 +1,39 @@
-# Локальный прогон тех же проверок, что и в CI: ошибка форматирования должна
-# ловиться до пуша, а не в pull request'е.
+# Установка: pip install pre-commit && pre-commit install
+# Прогон по всему дереву: pre-commit run --all-files
 #
-#   pip install pre-commit && pre-commit install
-#   pre-commit run --all-files
+# ruff ЗАПУСКАЕТСЯ ЧЕРЕЗ uv, а не через ruff-pre-commit. Раньше версия ruff была
+# пришпилена в ДВУХ местах — `rev` здесь и `version` у ruff-action в CI, — а в
+# самом репозитории её не было вовсе, поэтому локальный ruff мог отличаться от
+# обоих. Теперь версия живёт в [dependency-groups] dev корневого pyproject.toml,
+# и это единственное место.
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.2
+  - repo: local
     hooks:
       - id: ruff
         name: ruff (линтер)
-        args: [--fix]
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
       - id: ruff-format
         name: ruff (форматтер)
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: end-of-file-fixer
       - id: trailing-whitespace
+      # allow-multiple-documents: compose-файлы используют YAML-анкоры
+      # (x-clickhouse-server, x-clickhouse-keeper).
       - id: check-yaml
-        # Compose-файлы содержат YAML-якоря (x-clickhouse-server и т. п.),
-        # многодокументную проверку для них включать не нужно.
         args: [--allow-multiple-documents]
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files
         args: [--maxkb=2048]
       - id: detect-private-key
-      # Дубль корневого .env в рабочей копии — самая частая причина утечки
-      # секретов из этого репозитория.
       - id: check-case-conflict

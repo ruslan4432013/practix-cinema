@@ -1,0 +1,36 @@
+[project]
+name = "practix-etl-clickhouse"
+version = "1.0.0"
+description = "ETL Kafka -> ClickHouse: загрузка пользовательских событий в аналитическое хранилище"
+requires-python = ">=3.13"
+# Ни fastapi, ни starlette: у сервиса нет HTTP-API, /metrics поднимается голым
+# сервером. Поэтому у practix-core берутся только otel и kafka — extras как раз
+# для того, чтобы FastAPI не приехал транзитивно.
+dependencies = [
+    "practix-core[otel,kafka]",
+    "practix-contracts",
+    "aiokafka>=0.14.0",
+    "cramjam==2.11.0",
+    "clickhouse-connect[async]==1.6.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "prometheus-client>=0.24.1",
+]
+
+[dependency-groups]
+test = [
+    "practix-testing[kafka,clickhouse,http]",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+    "httpx>=0.28.1",
+]
+
+[project.scripts]
+etl-clickhouse = "practix_etl_clickhouse.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/practix_etl_clickhouse"]

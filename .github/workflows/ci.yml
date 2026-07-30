@@ -1,7 +1,6 @@
 name: CI
 
-# Тесты и линтер на каждый pull request и на пуш в main: до этого падение
-# набора обнаруживалось в лучшем случае на код-ревью.
+# Тесты и линтер на каждый pull request и на пуш в main.
 on:
   pull_request:
   push:
@@ -13,78 +12,155 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  UV_VERSION: '0.11.16'
+  NODE_VERSION: '24'
+
 jobs:
-  lint:
-    name: Линтер и форматтер
+  # --------------------------------------------------------------------------
+  # Быстрые проверки: линтер, типы, юнит-тесты — только для затронутых проектов.
+  # --------------------------------------------------------------------------
+  checks:
+    name: Проверки (nx affected)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/ruff-action@v3
         with:
-          version: 0.14.2
-      - run: ruff check --output-format=github .
-      - run: ruff format --check .
+          # Полная история нужна nx-set-shas: без неё не с чем сравнивать базу.
+          fetch-depth: 0
+      - uses: nrwl/nx-set-shas@v4
 
-  unit:
-    name: Юнит-тесты
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: '3.13'
-          cache: pip
-      - name: Установить зависимости коллектора
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      # ГЕЙТ ЦЕЛОСТНОСТИ ГРАФА — обязан идти ДО nx affected.
+      #
+      # Рёбра lib -> app плагин @nxlv/python берёт из uv.lock (поле
+      # metadata.requires-dist.<dep>.editable). Устаревший лок УДАЛЯЕТ рёбра
+      # молча: граф остаётся валидным, affected продолжает работать и просто
+      # перестаёт выбирать приложения при правке библиотеки. Изменение общего
+      # кода уехало бы непротестированным — единственный сценарий, в котором
+      # монорепозиторий хуже того, что было до него.
+      - name: uv lock --check
+        run: uv lock --check
+
+      - name: Синхронизировать окружение
+        run: uv sync --locked --all-packages --all-extras
+
+      # Список COPY <member>/pyproject.toml в Dockerfile нельзя записать
+      # шаблоном (COPY со звёздочкой уплощает дерево), поэтому он ручной — и
+      # проверяется на соответствие членам workspace.
+      - name: Манифесты в Dockerfile соответствуют workspace
+        run: uv run python tools/check_docker_manifests.py
+
+      - name: Граф зависимостей соответствует ожидаемому
         run: |
-          python -m pip install --upgrade pip
-          pip install -r analytics_collector/requirements.txt
-      - name: pytest tests/unit
-        env:
-          PYTHONPATH: analytics_collector/src
-          UGC_ENV: test
-        run: pytest tests/unit -v
+          npx nx graph --file=graph.json
+          uv run python tools/check_graph_edges.py graph.json
 
-  # Наборы независимы и идут параллельно. Каждый поднимает только свои
-  # зависимости, поэтому `ugc` не мешает `rest` и наоборот. Матрица, а не один
-  # job: падение одного набора не должно скрывать состояние остальных.
-  functional:
-    name: Функциональные тесты (${{ matrix.suite }})
+      # Кеш задач Nx. Ключ включает локи: смена зависимостей обязана
+      # инвалидировать всё, иначе кеш отдаст зелёный результат для другого набора.
+      - uses: actions/cache@v4
+        with:
+          path: .nx/cache
+          key: nx-${{ hashFiles('package-lock.json', 'uv.lock') }}-${{ github.sha }}
+          restore-keys: |
+            nx-${{ hashFiles('package-lock.json', 'uv.lock') }}-
+
+      - name: nx affected — lint
+        run: npx nx affected -t lint --parallel=3
+      # typecheck объявлен ТОЛЬКО у библиотек: у приложений mypy пока красный
+      # (10 ошибок, накопленных пока конфиг существовал, но не запускался).
+      # Подключаются по одному отдельными задачами — см. docs/monorepo.md.
+      - name: nx affected — typecheck (библиотеки)
+        run: npx nx affected -t typecheck --parallel=3
+      - name: nx affected — test (юнит-тесты и тесты библиотек)
+        run: npx nx affected -t test --parallel=3
+
+      - name: Список затронутых наборов для матрицы
+        id: affected
+        run: |
+          suites=$(npx nx show projects --affected --with-target test-functional --json)
+          echo "suites=$suites" >> "$GITHUB_OUTPUT"
+          echo "Затронутые наборы: $suites"
+    outputs:
+      suites: ${{ steps.affected.outputs.suites }}
+
+  # --------------------------------------------------------------------------
+  # Детектор дублирования: гейт против регресса. Порог в .jscpd.json чуть выше
+  # достигнутого уровня и снижается по мере извлечения — см. docs/monorepo.md.
+  # --------------------------------------------------------------------------
+  duplication:
+    name: Дублирование кода (jscpd)
     runs-on: ubuntu-latest
-    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx jscpd --config .jscpd.json .
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jscpd-report
+          path: .jscpd/
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # Функциональные наборы. Матрица генерируется из affected: PR, не трогающий
+  # аналитику, больше не поднимает Kafka и ClickHouse.
+  #
+  # Матрица остаётся ПАРАЛЛЕЛЬНОЙ. Правило «один набор за раз с down -v»
+  # действует внутри ОДНОГО демона Docker (наборы ETL публикуют заведомо
+  # некорректные сообщения, которые ломают фикстуру декодирования коллектора), а
+  # у каждого раннера GitHub свой демон.
+  # --------------------------------------------------------------------------
+  functional:
+    name: Функциональные тесты (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    needs: checks
+    if: needs.checks.outputs.suites != '[]'
     strategy:
       fail-fast: false
       matrix:
-        suite: [rest, auth, ugc, etl]
+        project: ${{ fromJson(needs.checks.outputs.suites) }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
 
       - name: Подготовить .env
         run: cp .env.example .env
 
-      # `up --abort-on-container-exit` здесь не годится: он валит весь стек,
-      # как только завершается одноразовый init-контейнер (kafka-init,
-      # clickhouse-init). Отсюда `run --rm` на конкретный сервис.
-      - name: Прогнать набор
-        run: |
-          set -o pipefail
-          case "${{ matrix.suite }}" in
-            rest) service=tests ;;
-            auth) service=auth-tests ;;
-            ugc)  service=ugc-tests ;;
-            etl)  service=etl-tests ;;
-          esac
-          docker compose -f tests/functional/docker-compose.yml \
-                         --project-directory tests/functional \
-                         run --rm --build "$service"
+      # Кеш слоёв BuildKit. Это САМЫЙ КРУПНЫЙ выигрыш во всём CI: раньше каждая
+      # из четырёх ветвей матрицы собирала образ с нуля (`run --rm --build`), то
+      # есть заново ставила все зависимости, четыре раза на каждый PR.
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Собрать образ и прогнать набор
+        run: npx nx run ${{ matrix.project }}:test-functional
 
       - name: Логи стека при падении
         if: failure()
         run: |
-          docker compose -f tests/functional/docker-compose.yml \
-                         --project-directory tests/functional logs --tail=200
+          docker compose -f infra/compose/docker-compose.test.yml \
+                         --project-directory infra/compose logs --tail=200
 
       - name: Погасить стек
         if: always()
         run: |
-          docker compose -f tests/functional/docker-compose.yml \
-                         --project-directory tests/functional down -v
+          docker compose -f infra/compose/docker-compose.test.yml \
+                         --project-directory infra/compose down -v

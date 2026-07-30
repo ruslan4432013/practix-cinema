@@ -1,0 +1,115 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "defaultBase": "main",
+  "namedInputs": {
+    "python": [
+      "{projectRoot}/**/*.py",
+      "{projectRoot}/pyproject.toml",
+      "!{projectRoot}/**/__pycache__/**",
+      "!{projectRoot}/**/.pytest_cache/**",
+      "!{projectRoot}/**/*.md",
+      "!{projectRoot}/tests/**"
+    ],
+    "pythonTests": [
+      "{projectRoot}/tests/**/*.py",
+      "{projectRoot}/pytest.ini"
+    ],
+    "lintConfig": [
+      "{workspaceRoot}/pyproject.toml"
+    ],
+    "sharedGlobals": [
+      "{workspaceRoot}/pyproject.toml",
+      "{workspaceRoot}/uv.lock",
+      "{workspaceRoot}/.python-version"
+    ],
+    "default": [
+      "python",
+      "pythonTests",
+      "sharedGlobals"
+    ]
+  },
+  "plugins": [
+    {
+      "plugin": "@nxlv/python",
+      "options": {
+        "packageManager": "uv",
+        "inferDependencies": false
+      }
+    }
+  ],
+  "targetDefaults": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "python",
+        "pythonTests",
+        "lintConfig"
+      ],
+      "outputs": [],
+      "options": {
+        "cwd": "{workspaceRoot}",
+        "parallel": false,
+        "commands": [
+          "ruff check --output-format=github {projectRoot}",
+          "ruff format --check {projectRoot}"
+        ]
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "python",
+        "pythonTests",
+        "^python",
+        "sharedGlobals"
+      ],
+      "outputs": [],
+      "options": {
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "docker": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "inputs": [
+        "python",
+        "^python",
+        "sharedGlobals"
+      ],
+      "outputs": [],
+      "options": {
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test-functional": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "inputs": [
+        "python",
+        "^python",
+        "sharedGlobals",
+        "{workspaceRoot}/tests/functional/**"
+      ],
+      "options": {
+        "cwd": "{workspaceRoot}",
+        "parallel": false
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "python",
+        "^python",
+        "lintConfig",
+        "sharedGlobals"
+      ],
+      "outputs": [],
+      "options": {
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}

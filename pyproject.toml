@@ -1,17 +1,48 @@
 [project]
-name = "async-api-sprint-1"
-version = "0.1.0"
-description = "Add your description here"
+name = "practix-cinema"
+version = "0.0.0"
+description = "Монорепозиторий онлайн-кинотеатра: сервисы в apps/, общий код в libs/"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = [
-    "elasticsearch[async]>=9.4.0",
-    "fastapi>=0.136.1",
-    "httpx>=0.28.1",
-    "pydantic>=2.13.4",
-    "pydantic-settings>=2.0.0",
-    "redis>=7.4.0",
-    "uvicorn>=0.47.0",
+# Зависимостей у корня нет намеренно: корень — только контейнер workspace'а.
+# Раньше здесь лежал список (fastapi, elasticsearch, redis...), который не
+# описывал ни один поставляемый артефакт: сервисы ставились из своих
+# requirements.txt, а сгенерированный из этого списка uv.lock не использовался
+# ничем и разъехался с ними по версиям.
+dependencies = []
+
+# --- uv workspace ----------------------------------------------------------
+# Один lock на весь репозиторий — то, чем должен был быть отсутствующий
+# constraints.txt: единая версия fastapi/pydantic по построению, а не по
+# договорённости, которую забыли выполнить. См. docs/monorepo.md.
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["apps/*", "libs/*"]
+# django-admin остаётся вне workspace: он на Python 3.12, а workspace делит
+# единый requires-python, и его включение опустило бы планку всем остальным.
+exclude = ["apps/django-admin"]
+
+[tool.uv.sources]
+# Только в корне: uv наследует источники корня всем членам workspace'а, и
+# @nxlv/python при построении графа объединяет корневые и проектные sources.
+# Эти три записи — то, из чего строится граф зависимостей Nx: без них рёбра
+# lib -> app молча исчезают, и `nx affected` недобирает проекты.
+practix-core = { workspace = true }
+practix-contracts = { workspace = true }
+practix-testing = { workspace = true }
+practix-search-schema = { workspace = true }
+
+[dependency-groups]
+# Единственное место, где закреплены версии инструментов. До этого ruff был
+# пришпилен в двух местах (ruff-action в CI и rev в pre-commit), а в самом
+# репозитории — нигде.
+dev = [
+    "ruff==0.14.2",
+    "mypy>=1.18.2",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
 ]
 
 # --- Линтер и форматтер -----------------------------------------------------
@@ -23,8 +54,9 @@ line-length = 120
 target-version = "py313"
 extend-exclude = [
     ".venv",
-    "**/migrations/versions/**",    # автогенерация Alembic
-    "**/django_admin/app/*/migrations/**",
+    "node_modules",
+    "**/migrations/versions/**",              # автогенерация Alembic
+    "apps/django-admin/*/migrations/**",      # автогенерация Django
     "sqlite_to_postgres",
     "schema_design",
 ]
@@ -58,22 +90,40 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Скрипты ожидания сервисов печатают в stdout намеренно: их читает человек,
 # смотрящий на вывод docker compose, а не система сбора логов.
-"tests/functional/utils/*.py" = ["T20"]
+"libs/testing/src/practix_testing/utils/wait_for_*.py" = ["T20"]
 "seed_db.py" = ["T20"]
+# Проверки в tools/ — консольные утилиты для CI и разработчика: печать в stdout
+# и есть их интерфейс, а сообщение об ошибке должно объяснять, что именно править.
+"tools/*.py" = ["T20"]
 # В CLI печать — это и есть пользовательский интерфейс.
-"auth/src/cli.py" = ["T20"]
-# Alembic импортирует модели ради побочного эффекта — регистрации в metadata.
-# Удаление «неиспользуемого» импорта сломало бы autogenerate.
-"auth/migrations/env.py" = ["F401"]
-# Набор auth правит sys.path до импортов приложения: PYTHONPATH внутри
-# контейнера указывает на другой корень, чем при локальном запуске.
-"tests/functional/auth/conftest.py" = ["E402"]
+"apps/auth/src/practix_auth/cli.py" = ["T20"]
+# Печать словаря топиков: модуль запускается как скрипт из create_topics.sh.
+"libs/analytics-contracts/src/practix_contracts/v1/topics.py" = ["T20"]
 # Django: атрибуты Meta и списки полей — часть фреймворка, а не изменяемые
 # значения по умолчанию в смысле RUF012.
-"django_admin/**" = ["RUF012"]
+"apps/django-admin/**" = ["RUF012"]
+#
+# Исключение E402 для tests/functional/auth/conftest.py УДАЛЕНО: оно требовалось
+# из-за правки sys.path перед импортами приложения, а с переходом сервисов в
+# настоящие пакеты правка стала не нужна. То же касается F401 в
+# auth/migrations/env.py — там теперь точечный noqa на импорте ради побочного
+# эффекта, а не исключение на весь файл.
 
 [tool.ruff.lint.isort]
-known-first-party = ["api", "core", "db", "models", "services", "brokers", "pipeline", "sinks", "transform", "observability", "gears", "lib"]
+# Плоских имён (api, core, db, ...) больше нет: сервисы стали настоящими
+# пакетами practix_*, и именно это позволило вынести общий код — раньше их
+# top-level имена совпадали и не могли жить на одном sys.path.
+known-first-party = [
+    "practix_core",
+    "practix_search_schema",
+    "practix_contracts",
+    "practix_testing",
+    "practix_movies_api",
+    "practix_auth",
+    "practix_analytics_collector",
+    "practix_etl_clickhouse",
+    "practix_etl_elasticsearch",
+]
 
 [tool.ruff.format]
 # Одинарные кавычки — доминирующий стиль в rest/ и в новых сервисах.
@@ -89,4 +139,24 @@ python_version = "3.13"
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
-files = ["etl_clickhouse/src", "analytics_collector/src"]
+# ТОЛЬКО библиотеки — и это осознанное сужение, а не упущение.
+#
+# Раньше здесь стояли `etl_clickhouse/src` и `analytics_collector/src`, но mypy
+# не запускался НИ В CI, НИ В pre-commit — то есть конфиг был мёртвым, и под ним
+# накопилось 10 ошибок типов в приложениях. Включить их сейчас значило бы либо
+# оставить гейт красным, либо чинить типы в чужом коде посреди переезда.
+#
+# Библиотеки — новый код, который контролируем целиком, и они проходят строго.
+# Приложения подключаются по одному отдельными задачами; список известных ошибок
+# — в docs/monorepo.md, раздел «Не сделано».
+files = [
+    "libs/platform-core/src",
+    "libs/analytics-contracts/src",
+    "libs/search-schema/src",
+    "libs/testing/src",
+]
+# Для библиотек требования строже: они импортируются всеми сервисами, и
+# незамеченная ошибка типов расходится по всему репозиторию.
+disallow_untyped_defs = false
+warn_unused_configs = true
+warn_no_return = true
