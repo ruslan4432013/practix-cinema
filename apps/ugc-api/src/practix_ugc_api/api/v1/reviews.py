@@ -27,6 +27,19 @@ router = APIRouter()
 
 _NOT_FOUND = {status.HTTP_404_NOT_FOUND: {'description': 'Рецензия не найдена'}}
 
+# У отзыва голоса причин для 404 две, и снаружи их надо различать: «рецензии
+# нет» — это про ресурс, «голоса не было» — про то, что отзывать нечего. Сервис
+# их уже различает (review_service.retract_vote), а до клиента доходил один и тот
+# же пустой 404. Теперь причина — в поле detail, и обе описаны здесь.
+_VOTE_NOT_FOUND = {
+    status.HTTP_404_NOT_FOUND: {
+        'description': (
+            'Рецензия не найдена (`detail: "Рецензия не найдена"`) либо пользователь за неё '
+            'не голосовал (`detail: "Голоса не было"`)'
+        )
+    }
+}
+
 
 @router.get(
     '',
@@ -135,7 +148,7 @@ async def vote(
     '/{review_id}/vote',
     status_code=status.HTTP_204_NO_CONTENT,
     summary='Отозвать свой голос',
-    responses={**AUTH_RESPONSES, **_NOT_FOUND},
+    responses={**AUTH_RESPONSES, **_VOTE_NOT_FOUND},
 )
 async def retract_vote(
     review_id: uuid.UUID,
@@ -147,5 +160,7 @@ async def retract_vote(
     except NotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     if retracted is None:
-        return Response(status_code=status.HTTP_404_NOT_FOUND)
+        # Рецензия есть, голоса пользователя за неё не было. Причина другая, чем
+        # выше, поэтому и текст другой — иначе клиент не отличит одно от другого.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Голоса не было')
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -4,6 +4,7 @@ import uuid
 
 from sqlalchemy import text
 
+import practix_ugc_api.db.redis as redis_module
 from practix_testing.utils.helpers import auth_header
 
 
@@ -141,6 +142,44 @@ async def test_retracting_a_vote_returns_the_counters_to_zero(client):
     fetched = await client.get(f'/api/v1/reviews/{review_id}')
     assert fetched.json()['useful_score'] == 0
     assert fetched.json()['votes_likes'] == 0
+
+
+async def test_retracting_a_vote_that_was_never_cast_says_so(client):
+    """Две причины 404 у этой ручки различимы снаружи, а не только внутри сервиса."""
+    response, _ = await create_review(client, uuid.uuid4())
+    review_id = response.json()['review_id']
+
+    never_voted = await client.delete(f'/api/v1/reviews/{review_id}/vote', headers=auth_header())
+    assert never_voted.status_code == 404
+    assert never_voted.json()['detail'] == 'Голоса не было'
+
+    no_review = await client.delete(f'/api/v1/reviews/{uuid.uuid4()}/vote', headers=auth_header())
+    assert no_review.status_code == 404
+    assert no_review.json()['detail'] == 'Рецензия не найдена'
+
+
+async def test_deleting_a_review_checks_the_denylist_once(client, monkeypatch):
+    """Автор и роль модератора снимаются с токена за один его разбор.
+
+    У DELETE рецензии две зависимости, которым нужен токен, и каждый разбор — это
+    поход в Redis за денилистом. Пока они дергали `jwt_required()` независимо,
+    удаление стоило двух round-trip.
+    """
+    response, author_headers = await create_review(client, uuid.uuid4())
+    review_id = response.json()['review_id']
+
+    checked = []
+    original_get = redis_module.auth_redis.get
+
+    async def counting_get(key):
+        checked.append(key)
+        return await original_get(key)
+
+    monkeypatch.setattr(redis_module.auth_redis, 'get', counting_get)
+
+    deleted = await client.delete(f'/api/v1/reviews/{review_id}', headers=author_headers)
+    assert deleted.status_code == 204
+    assert len(checked) == 1, f'ожидался один поход в денилист, было {len(checked)}'
 
 
 async def test_vote_for_a_missing_review_leaves_no_orphan(client, db):

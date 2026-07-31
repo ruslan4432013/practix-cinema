@@ -59,6 +59,23 @@ async def lifespan(_app: FastAPI):
         logger.warning('INSECURE DEFAULT: %s', problem)
 
     redis_db.auth_redis = redis_db.create_auth_redis()
+    if not await redis_db.denylist_reachable(redis_db.auth_redis):
+        # Соединение у redis-py ленивое: конструктор выше проверяет ровно
+        # ничего, поэтому опечатка в AUTH_REDIS_HOST/PORT молчала бы до первого
+        # запроса с токеном и вылезала бы поголовными 401 — денилист читается с
+        # политикой 'deny' (обоснование ниже, у install_denylist_loader).
+        #
+        # Старт при этом НЕ срывается. Экземпляр Redis общий на все реплики, и
+        # падение здесь превратило бы его моргание в лавину рестартов, заодно
+        # убив исправные публичные чтения. Та же логика, что в /health/ready:
+        # это degraded, а не фатально.
+        logger.warning(
+            'DENYLIST UNREACHABLE: Redis денилиста %s:%s (база %s) не отвечает — пока это так, '
+            'любой токен считается отозванным и запись отвечает 401',
+            settings.auth_redis_host,
+            settings.auth_redis_port,
+            settings.AUTH_REDIS_DB,
+        )
     yield
     if redis_db.auth_redis is not None:
         await redis_db.auth_redis.aclose()

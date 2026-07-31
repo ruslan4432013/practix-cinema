@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     AUTH_REDIS_HOST: str | None = None
     AUTH_REDIS_PORT: int | None = None
     AUTH_REDIS_DB: int = 0
+    # Единственный ключ этого блока с префиксом, и это не небрежность: имена выше
+    # описывают ЧУЖОЙ экземпляр (Redis Auth) и обязаны совпадать у всех сервисов,
+    # читающих один корневой .env, а таймаут — настройка нашего клиента. Голый
+    # UGC_REDIS_TIMEOUT уже принадлежит коллектору.
+    UGC_API_REDIS_TIMEOUT: float = 1.0
 
     # --- Distributed tracing (OpenTelemetry / Jaeger) ---
     OTEL_ENABLED: bool = True

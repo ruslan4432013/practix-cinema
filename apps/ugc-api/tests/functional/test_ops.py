@@ -5,8 +5,11 @@ import uuid
 import jwt
 from sqlalchemy import text
 
+import practix_ugc_api.db.redis as redis_module
 from practix_testing.utils.helpers import JWT_ALGORITHM, JWT_SECRET, auth_header, make_access_token
 from practix_ugc_api.cli import _DIVERGENCE, _DROP_ORPHANS, _RECOUNT
+from practix_ugc_api.db.redis import get_auth_redis
+from practix_ugc_api.main import app
 
 
 async def test_request_without_request_id_is_rejected(client):
@@ -20,7 +23,31 @@ async def test_liveness_and_readiness(client):
 
     ready = await client.get('/health/ready')
     assert ready.status_code == 200
-    assert ready.json()['database_connected'] is True
+    assert ready.json() == {'status': 'ok', 'database_connected': True, 'auth_denylist_connected': True}
+
+
+async def test_readiness_reports_denylist_outage_while_public_reads_keep_working(client):
+    """Отказ Redis денилиста виден в пробе, но не выводит сервис из ротации.
+
+    Отсутствие клиента — та же ветка, что и ошибка Redis: при `on_error='deny'`
+    загрузчик денилиста в обоих случаях считает токен отозванным. Подменяется и
+    зависимость пробы, и модульный синглтон — загрузчик ходит к нему напрямую,
+    мимо `dependency_overrides`.
+    """
+    redis_module.auth_redis = None
+    app.dependency_overrides[get_auth_redis] = lambda: None
+    try:
+        ready = await client.get('/health/ready')
+        assert ready.status_code == 200, 'экземпляр Redis общий на все реплики — 503 отключил бы и чтение'
+        assert ready.json() == {'status': 'degraded', 'database_connected': True, 'auth_denylist_connected': False}
+
+        # Ровно то, о чём сообщает `degraded`: записи отклоняются, чтения живы.
+        film_id = uuid.uuid4()
+        write = await client.put(f'/api/v1/likes/{film_id}', json={'rating': 9}, headers=auth_header())
+        assert write.status_code == 401
+        assert (await client.get(f'/api/v1/ratings/{film_id}')).status_code == 200
+    finally:
+        del app.dependency_overrides[get_auth_redis]
 
 
 async def test_revoked_token_is_rejected_and_writes_nothing(client, auth_redis, db):
