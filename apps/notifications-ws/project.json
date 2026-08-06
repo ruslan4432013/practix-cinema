@@ -1,0 +1,20 @@
+{
+  "name": "notifications-ws",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "apps/notifications-ws/src",
+  "tags": ["lang:python", "scope:notifications", "type:app"],
+  "targets": {
+    "lint": {},
+    "test": {
+      "options": {
+        "command": "uv run --package practix-notifications-ws --group test pytest apps/notifications-ws/tests/unit -v"
+      }
+    },
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target notifications-ws --build-arg PACKAGE=practix-notifications-ws --load -t practix/notifications-ws:local ."
+      }
+    }
+  }
+}

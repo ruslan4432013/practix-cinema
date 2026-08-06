@@ -97,4 +97,7 @@ node_modules/
 .nx/workspace-data/
 # Отчёты детектора дублей (jscpd), см. .jscpd.json
 .jscpd/
+# HTML-отчёт по линтерам, см. tools/lint_report.py. В CI он выгружается
+# артефактом прогона, в репозитории ему делать нечего.
+.lint-report/
 .ruff_cache/

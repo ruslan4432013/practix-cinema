@@ -1,6 +1,6 @@
 # 🎬 Async API — Онлайн-кинотеатр
 
-Асинхронная платформа онлайн-кинотеатра: read-only API поиска фильмов, сервис авторизации с JWT и ролями, админка Django, пользовательский контент (оценки, закладки, рецензии), сбор пользовательских действий в Kafka, аналитическое хранилище на ClickHouse и полная observability-обвязка. **Nx-монорепозиторий**: сервисы в `apps/`, общий код в `libs/`, инфраструктура в `infra/`. Стенд поднимается одним `infra/compose/docker-compose.yml` за Nginx. Python 3.13 (админка Django — 3.12).
+Асинхронная платформа онлайн-кинотеатра: read-only API поиска фильмов, сервис авторизации с JWT и ролями, админка Django, пользовательский контент (оценки, закладки, рецензии), сбор пользовательских действий в Kafka, рассылки с подтверждением email по коротким ссылкам, аналитическое хранилище на ClickHouse и полная observability-обвязка. **Nx-монорепозиторий**: сервисы в `apps/`, общий код в `libs/`, инфраструктура в `infra/`. Стенд поднимается одним `infra/compose/docker-compose.yml` за Nginx. Python 3.13 (админка Django — 3.12).
 
 [Ссылка на репозиторий](https://github.com/ruslan4432013/practix-cinema)
 
@@ -66,7 +66,7 @@ flowchart TB
     nginx & movies & auth & django & collector & etlch & etl -. "JSON в stdout" .-> filebeat["Filebeat"] --> logstash["Logstash :5044"] --> eslogs[("Elasticsearch логов :9210<br/>practix-logs-YYYY.MM.DD")] --> kibana["Kibana :5601"]
 ```
 
-Семь сервисов, около двух десятков контейнеров, четыре узла ClickHouse. Состав
+Девять сервисов, около двух десятков контейнеров, четыре узла ClickHouse. Состав
 стенда, порты и хранилища — в [`docs/architecture.md`](docs/architecture.md).
 
 ---
@@ -77,6 +77,7 @@ flowchart TB
 * **Приём событий не отвечает 5xx никогда** — при недоступной Kafka событие уходит в крашоустойчивый буфер Redis и доставляется после восстановления.
 * **Данные не теряются при отказе ClickHouse** — оффсеты коммитятся только после вставки, чтение из Kafka ставится на паузу, сама Kafka играет роль неограниченного буфера.
 * **Дедупликация в три уровня** — `set` по `event_id` в пачке → `insert_deduplication_token` → `ReplacingMergeTree`.
+* **Уведомление доходит, даже когда websocket отвалился** — изящная деградация в три ступени: сокет → long polling → долговечная лента кабинета, склейка по `task_id`.
 * **Один `request_id` от Nginx до строки лога** — общий идентификатор связывает трейс в Jaeger, ошибку в GlitchTip и логи в Kibana.
 * **Преагрегат рейтинга вместо агрегации на лету** — разница в 13 раз на популярном фильме; лайки выводятся из гистограммы по настраиваемому порогу, а не хранятся.
 * **Исследование хранилища под UGC на 10 млн оценок** — MongoDB vs PostgreSQL vs ClickHouse, честные замеры p99 на живом шардированном кластере.
@@ -106,7 +107,7 @@ Movies API под `wrk` (200 000 фильмов в Elasticsearch, кэш Redis):
 (152.3 против 0.9 мс). Отсюда и выбор хранилища для `apps/ugc-api/`.
 Методика и полные таблицы — [`research/ugc-storage/`](research/ugc-storage/README.md).
 
-Дублирование кода — **0.88 %** против 4.53 % до переезда на монорепозиторий, с
+Дублирование кода — **0.65 %** против 4.53 % до переезда на монорепозиторий, с
 жёстким гейтом `jscpd` в CI.
 
 ---
@@ -117,10 +118,12 @@ Movies API под `wrk` (200 000 фильмов в Elasticsearch, кэш Redis):
 cp .env.example .env
 DC="docker compose --env-file .env -f infra/compose/docker-compose.yml --project-directory infra/compose"
 
-$DC up -d --build                    # ядро: 12 сервисов
+$DC up -d --build                    # ядро: 15 сервисов
 #   + --profile warehouse       ClickHouse, Keeper, ETL ClickHouse
 #   + --profile observability   Prometheus, Grafana, Kafka UI, GlitchTip
 #   + --profile logging         Elasticsearch (логи), Logstash, Kibana, Filebeat
+#   + --profile notifications   Панель рассылок, сборщик, отправитель, планировщик,
+#                               websocket-шлюз, RabbitMQ, Mailpit
 
 uv run --with psycopg2-binary --with faker python seed_db.py   # тестовые данные
 ```
@@ -132,16 +135,21 @@ ClickHouse, проверка отказоустойчивости и утече�
 
 Открыть после запуска: Swagger Movies API — http://localhost/api/openapi,
 Jaeger — http://localhost:16686, Grafana — http://localhost:3000,
-Kibana — http://localhost:5601 (профиль `logging`).
+Kibana — http://localhost:5601 (профиль `logging`),
+панель рассылок — http://localhost:8090/admin/ (профиль `notifications`),
+витрина деградации websocket → polling — http://localhost:8090/demo/cabinet.
 
 ---
 
 ## Непрерывная интеграция
 
-Пять job на каждый PR: гейты целостности, `nx affected` (ruff + mypy + тесты) на
-матрице Python 3.13/3.14, проверка дублирования, функциональные наборы по одному
-на раннер и уведомление об итоге в Telegram. Статус каждой job отдельной строкой,
-`⏭` у функциональных тестов означает, что `nx affected` не выбрал ни одного набора:
+Шесть job на каждый PR в `main` (других триггеров нет — ветка защищена, и код
+попадает в неё только через PR): гейты целостности, `nx affected` (ruff + mypy +
+тесты) на матрице Python 3.13/3.14, HTML-отчёт по линтерам артефактом прогона
+(ruff + wemake-python-styleguide + mypy), проверка дублирования, функциональные
+наборы по одному на раннер и уведомление об итоге в Telegram. Статус каждой job
+отдельной строкой, `⏭` у функциональных тестов означает, что `nx affected` не
+выбрал ни одного набора:
 
 <img src="assets/ci_tg_result.png" alt="Уведомление об итоге CI в Telegram" width="380">
 
@@ -161,11 +169,16 @@ Kibana — http://localhost:5601 (профиль `logging`).
 | [`docs/testing.md`](docs/testing.md) | Юнит, функциональные и нагрузочные тесты |
 | [`docs/quality.md`](docs/quality.md) | Линт, типы, дублирование, проверки целостности, CI |
 | [`docs/monorepo.md`](docs/monorepo.md) | Устройство монорепозитория, решения и ловушки |
+| [`docs/notifications.md`](docs/notifications.md) | Проектное решение сервиса нотификаций (задания спринта 10) |
+| [`docs/websockets.md`](docs/websockets.md) | Websocket-шлюз мгновенных уведомлений и деградация на long polling |
 
 Документация сервисов: [Auth](apps/auth/README.md) ·
 [Analytics Collector](apps/analytics-collector/README.md) ·
 [ETL ClickHouse](apps/etl-clickhouse/README.md) ·
 [UGC API](apps/ugc-api/README.md) ·
+[Нотификации](apps/notifications/README.md) ·
+[Websocket-шлюз](apps/notifications-ws/README.md) ·
+[Сокращение ссылок](apps/link-shortener/README.md) ·
 [ELK](infra/elk/README.md) ·
 [Исследование хранилища UGC](research/ugc-storage/README.md) ·
 [Нагрузочные тесты](loadtests/README.md)

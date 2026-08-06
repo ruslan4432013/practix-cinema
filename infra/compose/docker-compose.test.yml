@@ -1,3 +1,107 @@
+# Общее окружение контейнеров сервиса нотификаций (образ один, ролей пять).
+# Якорь на верхнем уровне, а не внутри services: расширяющие поля `x-*` рядом с
+# именами сервисов Compose разбирает по-разному в зависимости от версии, и
+# отладка этого стоит дороже пяти строк.
+x-notifications-env: &notifications-test-env
+  PYTEST_ADDOPTS: -p no:cacheprovider
+  NOTIFY_POSTGRES_HOST: notifications-db
+  NOTIFY_POSTGRES_PORT: "5432"
+  NOTIFY_POSTGRES_USER: postgres
+  NOTIFY_POSTGRES_PASSWORD: secret
+  NOTIFY_POSTGRES_DB: notifications_database
+  NOTIFY_AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+  NOTIFY_SMTP_HOST: mailpit
+  NOTIFY_SMTP_PORT: "1025"
+  # Тик раз в секунду вместо тридцати: тест на отложенную рассылку иначе ждал бы
+  # полминуты на ровном месте.
+  NOTIFY_SCHEDULER_TICK_SECONDS: "1"
+  NOTIFY_RETRY_TTL_MS: "2000"
+  NOTIFY_MAX_ATTEMPTS: "2"
+  # Тихие часы ВКЛЮЧЕНЫ, и окно накрывает сутки целиком — то есть срабатывают
+  # они всегда и не зависят от времени запуска набора. Раньше здесь стояло
+  # `False`, потому что окно по умолчанию (22:00–09:00) роняло бы ночной прогон;
+  # но выключенные тихие часы означали, что на стенде они не проверялись вовсе.
+  #
+  # Что делает набор детерминированным при включённом окне: вторая, ПОКАМПАНЕЙНАЯ
+  # проверка `Campaign.respect_quiet_hours`. Фикстура `campaign` в conftest
+  # ставит её в False, поэтому все остальные тесты отправляют письма как прежде,
+  # а тест тихих часов заводит свою рассылку с флагом True.
+  NOTIFY_QUIET_HOURS_ENABLED: "True"
+  NOTIFY_QUIET_HOURS_START: "00:00"
+  NOTIFY_QUIET_HOURS_END: "23:59"
+  NOTIFY_SMTP_RATE_PER_SECOND: "200"
+  # Межсервисный секрет приёма событий: набор шлёт доменные события сам, вместо
+  # контентной админки.
+  NOTIFY_INTAKE_TOKEN: test-internal-token
+  # Личный кабинет. Токен набор подписывает сам этим же ключом — в том и смысл
+  # локальной проверки, что ходить в Auth за ней не нужно. Отзыв читается в
+  # Redis ядра, куда тест пишет jti напрямую.
+  AUTHJWT_SECRET_KEY: secret
+  AUTH_REDIS_HOST: redis
+  AUTH_REDIS_PORT: "6379"
+  AUTH_REDIS_DB: "0"
+  # Настоящий Auth: формирующий воркер ходит туда за именем, фамилией и адресом
+  # получателя, и подменять это заглушкой значило бы не проверять главное.
+  # Учётка заводится одноразовым контейнером auth-service-account.
+  NOTIFY_AUTH_API_URL: http://auth:8000
+  NOTIFY_AUTH_SERVICE_LOGIN: svc-notifications
+  NOTIFY_AUTH_SERVICE_PASSWORD: Svc-Notify123!
+  NOTIFY_BUILD_MESSAGE_BATCH: "5"
+  NOTIFY_BUILDER_LOOKUP_BATCH: "50"
+  NOTIFY_RETRY_BUILD_TTL_MS: "2000"
+  NOTIFY_BUILD_MAX_ATTEMPTS: "2"
+  # Кеш резолва выключен: тест меняет имя в Auth и ждёт его в следующем письме.
+  NOTIFY_DIRECTORY_CACHE_TTL: "0"
+  # Настоящий сервис сокращения ссылок: сквозной тест подтверждения адреса
+  # разбирает ссылку прямо из письма и ходит по ней.
+  NOTIFY_SHORTENER_API_URL: http://link-shortener:8000
+  NOTIFY_SHORTENER_INTERNAL_TOKEN: test-shortener-token
+  NOTIFY_CONFIRM_REDIRECT_URL: http://localhost/
+  OTEL_ENABLED: "False"
+  SENTRY_ENABLED: "False"
+
+# Сборка образа Auth. Объявлена у ВСЕХ трёх сервисов, а не у одного: compose
+# собирает образ только для той службы, у которой есть секция build, а для
+# остальных пытается его СКАЧАТЬ — и падает на `pull access denied`, потому что
+# practix/auth в реестре не существует. С общим якорем любой порядок разрешения
+# зависимостей приводит к собранному образу.
+# Сборка образа сервиса ссылок. Объявлена якорем и повешена на ВСЕ три службы,
+# которые делят тег, — по той же причине, что и у Auth ниже: compose собирает
+# образ только там, где есть секция build, а остальные пытается СКАЧАТЬ и падает
+# на `pull access denied`.
+x-shortener-build: &shortener-test-build
+  context: ../..
+  dockerfile: infra/docker/python-service.Dockerfile
+  target: link-shortener
+  args:
+    PACKAGE: practix-link-shortener
+    UV_GROUPS: --group test
+
+x-auth-build: &auth-test-build
+  context: ../..
+  dockerfile: infra/docker/python-service.Dockerfile
+  target: auth
+  args:
+    PACKAGE: practix-auth
+
+# Общее окружение контейнеров Auth в стенде нотификаций (образ один, ролей три:
+# миграции, сервис, заведение служебной учётки).
+x-auth-env: &auth-test-env
+  AUTH_POSTGRES_HOST: auth-db
+  AUTH_POSTGRES_PORT: "5432"
+  AUTH_POSTGRES_USER: postgres
+  AUTH_POSTGRES_PASSWORD: secret
+  AUTH_POSTGRES_DB: auth_database
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  AUTHJWT_SECRET_KEY: secret
+  # 20 запросов в минуту на IP — лимит, рассчитанный на человека. Формирующий
+  # воркер делает запрос на пачку получателей, и за прогон их десятки; с боевым
+  # лимитом набор падал бы на 429, проверяя не то, что задумано.
+  RATE_LIMIT_TIMES: "10000"
+  OTEL_ENABLED: "False"
+  SENTRY_ENABLED: "False"
+
 services:
   elasticsearch:
     image: elasticsearch:9.4.1
@@ -209,6 +313,46 @@ services:
     # auth-tests: entrypoint.sh создаёт .env из .env.example, а pydantic-settings
     # ищет .env относительно рабочего каталога образа.
     command: ["pytest", "/opt/app/apps/ugc-api/tests/functional", "-v"]
+
+  shortener-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: shortener_database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shortener_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Имя с префиксом сервиса, как у ugc-api-tests: короткое `shortener-tests`
+  # однажды столкнулось бы с набором чужого сервиса ровно так же.
+  #
+  # Auth в зависимостях НЕТ: набор подменяет его заглушкой через
+  # dependency_overrides — он проверяет поведение шортенера, а не Auth. Сквозной
+  # путь до настоящего Auth проверяет набор нотификаций.
+  link-shortener-tests:
+    build: *shortener-test-build
+    image: practix/link-shortener:test
+    environment:
+      - PYTEST_ADDOPTS=-p no:cacheprovider
+      - SHORTENER_POSTGRES_HOST=shortener-db
+      - SHORTENER_POSTGRES_PORT=5432
+      - SHORTENER_POSTGRES_USER=postgres
+      - SHORTENER_POSTGRES_PASSWORD=secret
+      - SHORTENER_POSTGRES_DB=shortener_database
+      - SHORTENER_PUBLIC_BASE_URL=http://localhost
+      - SHORTENER_ALLOWED_REDIRECT_HOSTS=localhost,127.0.0.1
+      - OTEL_ENABLED=False
+      - SENTRY_ENABLED=False
+    depends_on:
+      shortener-db:
+        condition: service_healthy
+    # ENTRYPOINT и working_dir не переопределяются — см. подробный комментарий у
+    # auth-tests: entrypoint.sh создаёт .env из .env.example, а pydantic-settings
+    # ищет .env относительно рабочего каталога образа.
+    command: ["pytest", "/opt/app/apps/link-shortener/tests/functional", "-v"]
 
   # Один брокер вместо трёх: тесты проверяют логику сервиса, а не
   # отказоустойчивость кластера, и лишние два узла только замедляют прогон.
@@ -432,3 +576,319 @@ services:
       sh -c "python3 -m practix_testing.utils.wait_for_kafka
       && python3 -m practix_testing.utils.wait_for_clickhouse
       && pytest /opt/app/apps/etl-clickhouse/tests/functional -v"
+
+  # ==================== Стенд сервиса нотификаций =========================
+  # Postgres, RabbitMQ, Mailpit и Auth — настоящие: проверяется именно то, что
+  # ломается на живой инфраструктуре (топология очередей, идемпотентность,
+  # dead-letters, поход воркера за личными данными), а не то, что и так покрыто
+  # юнит-тестами на заглушках.
+  #
+  # ЛОВУШКА ОБЩЕЙ БАЗЫ. Набор auth-tests работает с той же auth-db и делает
+  # `drop_all`/`create_all`, а `drop_all` НЕ удаляет таблицу alembic_version.
+  # Если запустить наборы подряд без `down -v`, `alembic upgrade head` ниже
+  # решит, что он уже на последней ревизии, и не создаст ни одной таблицы.
+  # Правило «один набор за раз на чистом стенде» здесь не рекомендация.
+  auth-migrations:
+    build: *auth-test-build
+    image: practix/auth:test-server
+    environment: *auth-test-env
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    # ENTRYPOINT образа не переопределяется (см. комментарий у auth-tests):
+    # он создаёт .env, без которого настройки Auth не собираются.
+    command: ["sh", "-c", "alembic -c apps/auth/alembic.ini upgrade head"]
+
+  auth:
+    build: *auth-test-build
+    image: practix/auth:test-server
+    environment: *auth-test-env
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-migrations:
+        condition: service_completed_successfully
+    # Проба обязана слать X-Request-Id: без заголовка RequestIdMiddleware
+    # отвечает 400 ещё до обработчика, и контейнер никогда не станет healthy.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/api/openapi.json', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  # Служебная учётка, под которой сервис нотификаций ходит в Auth. Заводится
+  # штатным CLI, а не INSERT'ом: важно, чтобы это был обычный пользователь,
+  # которого можно заблокировать, а не самовыписанный токен.
+  #
+  # Подкоманда пишется ЯВНО: у Typer приложение с одной командой схлопывалось, но
+  # команд стало две (см. practix_auth/cli.py), и схлопывание снято callback'ом.
+  # Пароль передан явно, поэтому интерактивных запросов не будет.
+  auth-service-account:
+    build: *auth-test-build
+    image: practix/auth:test-server
+    environment: *auth-test-env
+    depends_on:
+      auth-migrations:
+        condition: service_completed_successfully
+      auth-db:
+        condition: service_healthy
+    command:
+      - "python"
+      - "-m"
+      - "practix_auth.cli"
+      - "createsuperuser"
+      - "--login"
+      - "svc-notifications"
+      # Не `@practix.local`: pydantic EmailStr отвергает .local как
+      # зарезервированный домен, и учётка не заводится.
+      - "--email"
+      - "svc-notifications@example.com"
+      - "--password"
+      - "Svc-Notify123!"
+
+  # Учётка сервиса сокращения ссылок. Роль УЗКАЯ (`email-confirmer`), а не
+  # `admin`: ему нужна ровно одна ручка — пометить адрес подтверждённым.
+  auth-service-account-shortener:
+    build: *auth-test-build
+    image: practix/auth:test-server
+    environment: *auth-test-env
+    depends_on:
+      auth-service-account:
+        condition: service_completed_successfully
+    command:
+      - "python"
+      - "-m"
+      - "practix_auth.cli"
+      - "create-service-account"
+      - "--login"
+      - "svc-link-shortener"
+      - "--email"
+      - "svc-link-shortener@example.com"
+      - "--password"
+      - "Svc-Short123!"
+      - "--role"
+      - "email-confirmer"
+
+  notifications-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: notifications_database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d notifications_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  notifications-migrations:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: notifications
+      args:
+        PACKAGE: practix-notifications
+        UV_GROUPS: --group test
+    image: practix/notifications:test
+    environment: *notifications-test-env
+    depends_on:
+      notifications-db:
+        condition: service_healthy
+    command: ["python", "-m", "practix_notifications.manage", "migrate", "--no-input"]
+
+  notifications-admin:
+    image: practix/notifications:test
+    environment: *notifications-test-env
+    depends_on:
+      notifications-migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      # Личный кабинет проверяет отзыв токена в Redis сервиса Auth.
+      redis:
+        condition: service_healthy
+
+  # Формирующий воркер: ходит в Auth за именем, фамилией и адресом и собирает
+  # письмо. Отсюда зависимости, которых нет у отправляющего.
+  notifications-builder:
+    image: practix/notifications:test
+    environment: *notifications-test-env
+    depends_on:
+      notifications-migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      auth-service-account:
+        condition: service_completed_successfully
+    command: ["python", "-m", "practix_notifications.manage", "run_builder"]
+
+  notifications-worker:
+    image: practix/notifications:test
+    environment: *notifications-test-env
+    depends_on:
+      notifications-migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    command: ["python", "-m", "practix_notifications.manage", "run_worker"]
+
+  notifications-scheduler:
+    image: practix/notifications:test
+    environment: *notifications-test-env
+    depends_on:
+      notifications-migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    command: ["python", "-m", "practix_notifications.manage", "run_scheduler"]
+
+  # Websocket-шлюз. Свой образ (свой пакет и свой набор зависимостей), но тот же
+  # брокер и тот же Redis, что у остальных: набор проверяет ВСЮ цепочку —
+  # приём события → веер → сборка → WebsocketSender → fanout → сокет.
+  notifications-ws:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: notifications-ws
+      args:
+        PACKAGE: practix-notifications-ws
+    image: practix/notifications-ws:test
+    environment:
+      PYTEST_ADDOPTS: -p no:cacheprovider
+      NOTIFY_AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+      AUTHJWT_SECRET_KEY: secret
+      AUTH_REDIS_HOST: redis
+      AUTH_REDIS_PORT: "6379"
+      AUTH_REDIS_DB: "0"
+      # Пять секунд вместо минуты — это минимум, который допускает валидатор
+      # настроек, и опускать нижнюю границу ради теста нельзя: перепроверка идёт
+      # НА КАЖДОЕ соединение, и секундный период превратил бы её в горячий цикл
+      # запросов к Redis на проде.
+      NOTIFY_WS_REVALIDATE_SECONDS: "5"
+      # Короткий long-poll: набор проверяет и «пришло», и «истёк таймаут».
+      NOTIFY_WS_POLL_TIMEOUT: "5"
+      NOTIFY_WS_PING_INTERVAL: "5"
+      # Низкий лимит намеренно: набор открывает сокеты и не всегда успевает
+      # закрыть предыдущий, и при щедром значении утечка подписки прошла бы
+      # незамеченной. Сам лимит проверяется юнит-тестом реестра.
+      NOTIFY_WS_MAX_CONNECTIONS_PER_USER: "2"
+      OTEL_ENABLED: "False"
+      SENTRY_ENABLED: "False"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Сервис сокращения ссылок на стенде нотификаций — настоящий, а не заглушка:
+  # сквозной тест разбирает ссылку прямо из письма и переходит по ней.
+  #
+  # SHORTENER_PUBLIC_BASE_URL указывает на КОНТЕЙНЕР, а не на http://localhost:
+  # nginx на этом стенде нет, и ссылка из письма должна быть достижима из
+  # контейнера тестов. В продакшене там внешний адрес.
+  link-shortener:
+    build: *shortener-test-build
+    image: practix/link-shortener:test
+    environment:
+      SHORTENER_POSTGRES_HOST: shortener-db
+      SHORTENER_POSTGRES_PORT: "5432"
+      SHORTENER_POSTGRES_USER: postgres
+      SHORTENER_POSTGRES_PASSWORD: secret
+      SHORTENER_POSTGRES_DB: shortener_database
+      SHORTENER_PUBLIC_BASE_URL: http://link-shortener:8000
+      SHORTENER_ALLOWED_REDIRECT_HOSTS: localhost,127.0.0.1
+      SHORTENER_INTERNAL_TOKEN: test-shortener-token
+      SHORTENER_AUTH_API_URL: http://auth:8000
+      SHORTENER_AUTH_SERVICE_LOGIN: svc-link-shortener
+      SHORTENER_AUTH_SERVICE_PASSWORD: Svc-Short123!
+      OTEL_ENABLED: "False"
+      SENTRY_ENABLED: "False"
+    depends_on:
+      shortener-migrations:
+        condition: service_completed_successfully
+      auth:
+        condition: service_healthy
+      auth-service-account-shortener:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/health/live', timeout=3).status == 200 else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  shortener-migrations:
+    build: *shortener-test-build
+    image: practix/link-shortener:test
+    environment:
+      SHORTENER_POSTGRES_HOST: shortener-db
+      SHORTENER_POSTGRES_PORT: "5432"
+      SHORTENER_POSTGRES_USER: postgres
+      SHORTENER_POSTGRES_PASSWORD: secret
+      SHORTENER_POSTGRES_DB: shortener_database
+    depends_on:
+      shortener-db:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic -c apps/link-shortener/alembic.ini upgrade head"]
+
+  notifications-tests:
+    image: practix/notifications:test
+    environment:
+      <<: *notifications-test-env
+      MAILPIT_URL: http://mailpit:8025
+      RABBITMQ_API_URL: http://rabbitmq:15672
+      NOTIFICATIONS_URL: http://notifications-admin:8000
+      # Получатели заводятся настоящей регистрацией в Auth: только так у них
+      # есть имя и фамилия, которые воркер потом подставит в письмо.
+      AUTH_URL: http://auth:8000
+      NOTIFICATIONS_WS_URL: http://notifications-ws:8000
+      SHORTENER_URL: http://link-shortener:8000
+    depends_on:
+      notifications-admin:
+        condition: service_healthy
+      notifications-ws:
+        condition: service_healthy
+      link-shortener:
+        condition: service_healthy
+      notifications-builder:
+        condition: service_started
+      notifications-worker:
+        condition: service_started
+      notifications-scheduler:
+        condition: service_started
+      auth:
+        condition: service_healthy
+      # Тест отозванного токена пишет jti прямо в денилист.
+      redis:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "python -m practix_testing.utils.wait_for_rabbitmq
+      && python -m practix_testing.utils.wait_for_mailpit
+      && pytest /opt/app/apps/notifications/tests/functional -v"

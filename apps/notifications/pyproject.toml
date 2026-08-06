@@ -1,0 +1,63 @@
+[project]
+name = "practix-notifications"
+version = "1.0.0"
+description = "Нотификации: админ-панель менеджера, воркер рассылки, планировщик"
+requires-python = ">=3.13"
+dependencies = [
+    # ТОЛЬКО [otel,sentry]: экстры [asgi]/[fastapi]/[jwt] тянут starlette и fastapi,
+    # которым в WSGI-образе делать нечего. Ради этой строки сервис и живёт внутри
+    # workspace'а: django-admin вынесен наружу (Python 3.12) и вынужден форкать
+    # логгер, инициализацию Sentry и request-id middleware — три копии, четвёртую
+    # писать не пришлось.
+    "practix-core[otel,sentry]",
+    # Верхняя граница по мажору — как у django-admin: мажорные релизы Django ломают
+    # совместимость, а тестов админки у нас ровно столько, сколько мы написали сами.
+    "django>=5.2.9,<6",
+    # gunicorn, а не uwsgi. uwsgi собирается из исходников против libpcre2 и это
+    # ИМЕННО ТА причина, по которой django-admin застрял на Python 3.12 и вне
+    # workspace'а (docs/monorepo.md, «Не сделано»). Затащить его сюда значило бы
+    # импортировать ту же проблему в общий образ и общий лок.
+    "gunicorn>=23.0.0",
+    # Статику админки отдаёт сам процесс: django-admin получает её от nginx через
+    # общий том static_volume, а мы за nginx не стоим (профиль + прямой хост-порт).
+    "whitenoise>=6.8.0",
+    "psycopg[binary]>=3.2.3",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "pika>=1.3.2",
+    "jinja2>=3.1.6",
+    "croniter>=6.0.0",
+    "requests>=2.32.5",
+    "opentelemetry-instrumentation-django>=0.64b0",
+    "opentelemetry-instrumentation-requests>=0.64b0",
+    # Денилист отозванных токенов ведёт Auth, и читается он в ЕГО экземпляре
+    # Redis. Своих данных в Redis у сервиса нет — это единственный клиент, и он
+    # чужой (см. core/redis.py).
+    "redis>=8.0.0",
+    # ТОЛЬКО pyjwt. Экстра practix-core[jwt] притащила бы async-fastapi-jwt-auth,
+    # а с ней fastapi и starlette в WSGI-образ — ради одной функции jwt.decode.
+    "pyjwt>=2.10.1",
+]
+
+[dependency-groups]
+# pytest-asyncio здесь НЕТ намеренно: сервис целиком синхронный — pika работает
+# на BlockingConnection, smtplib синхронен, Django ORM синхронен. Это осознанное
+# расхождение с четырьмя async-сервисами, а не забытая строка.
+test = [
+    "practix-testing",
+    "pytest>=9.1.0",
+    "pytest-django>=4.9.0",
+    # Клиент websocket для функционального набора: сквозной путь уведомления
+    # (событие → веер → сборка → push → сокет) проверяется здесь, на стенде, где
+    # уже стоит всё остальное — см. докстринг tests/functional/test_websocket.py.
+    # Синхронный `websockets.sync.client` ложится на набор, целиком построенный
+    # на requests, и не тянет сюда pytest-asyncio.
+    "websockets>=15.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/practix_notifications"]

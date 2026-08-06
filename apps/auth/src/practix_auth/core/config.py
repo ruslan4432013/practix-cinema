@@ -58,6 +58,19 @@ class Settings(BaseSettings):
     YANDEX_USERINFO_URL: str = 'https://login.yandex.ru/info'
     OAUTH_STATE_TTL: int = 300
 
+    # --- Отчётные события в сервис нотификаций ---
+    # ВЫКЛЮЧЕНО по умолчанию: без профиля `notifications` контейнера нет в сети,
+    # и включённый по умолчанию продюсер дал бы попытку резолвить несуществующий
+    # хост на каждой регистрации. Провал отправки события никогда не влияет на
+    # саму регистрацию — см. services/notifications_client.py.
+    NOTIFY_EVENTS_ENABLED: bool = False
+    NOTIFY_API_URL: str = 'http://notifications-admin:8000'
+    # Имя ключа то же, что у сервиса нотификаций: секрет один, и ротировать его
+    # надо в одном месте. Все контейнеры читают один корневой .env.
+    NOTIFY_INTAKE_TOKEN: str = ''
+    NOTIFY_EVENT_TIMEOUT: float = 3.0
+    NOTIFY_EVENT_MAX_ATTEMPTS: int = 3
+
     # --- Distributed tracing (OpenTelemetry / Jaeger) ---
     OTEL_ENABLED: bool = True
     OTEL_SERVICE_NAME: str = 'auth-service'

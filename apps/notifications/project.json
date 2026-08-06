@@ -1,0 +1,36 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "notifications",
+  "projectType": "application",
+  "sourceRoot": "apps/notifications/src",
+  "tags": ["lang:python", "scope:notifications", "type:app"],
+  "targets": {
+    "lint": {},
+    "test": {
+      "options": {
+        "command": "uv run --package practix-notifications --group test pytest apps/notifications/tests/unit -v"
+      }
+    },
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target notifications --build-arg PACKAGE=practix-notifications --load -t practix/notifications:local ."
+      }
+    },
+    "test-functional": {
+      "inputs": [
+        "python",
+        "pythonTests",
+        "^python",
+        "sharedGlobals",
+        "{workspaceRoot}/infra/compose/**",
+        "{workspaceRoot}/infra/docker/**"
+      ],
+      "options": {
+        "commands": [
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose run --rm --build notifications-tests",
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose down -v"
+        ]
+      }
+    }
+  }
+}

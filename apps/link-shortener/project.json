@@ -1,0 +1,48 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "link-shortener",
+  "projectType": "application",
+  "sourceRoot": "apps/link-shortener/src",
+  "tags": [
+    "lang:python",
+    "scope:links",
+    "type:app"
+  ],
+  "targets": {
+    "lint": {},
+    "test": {
+      "options": {
+        "command": "uv run --package practix-link-shortener --group test pytest apps/link-shortener/tests/unit -v"
+      }
+    },
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target link-shortener --build-arg PACKAGE=practix-link-shortener --load -t practix/link-shortener:local ."
+      }
+    },
+    "test-functional": {
+      "inputs": [
+        "python",
+        "pythonTests",
+        "^python",
+        "sharedGlobals",
+        "{workspaceRoot}/infra/compose/**",
+        "{workspaceRoot}/infra/docker/**"
+      ],
+      "options": {
+        "commands": [
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose run --rm --build link-shortener-tests",
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose down -v"
+        ]
+      }
+    },
+    "migrate": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "cwd": "{workspaceRoot}",
+        "command": "uv run --package practix-link-shortener alembic -c apps/link-shortener/alembic.ini upgrade head"
+      }
+    }
+  }
+}

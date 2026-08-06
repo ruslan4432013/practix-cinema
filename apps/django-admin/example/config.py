@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     AUTH_API_TIMEOUT: float = 2.0
     AUTH_API_MAX_ATTEMPTS: int = 3
 
+    # --- Отчётные события в сервис нотификаций ---
+    # ВЫКЛЮЧЕНО по умолчанию: без профиля `notifications` контейнера нет в сети.
+    # Ключи те же и с теми же именами, что у Auth и у самих нотификаций: секрет
+    # один, корневой .env один, ротация в одном месте.
+    NOTIFY_EVENTS_ENABLED: bool = False
+    NOTIFY_API_URL: str = 'http://notifications-admin:8000'
+    NOTIFY_INTAKE_TOKEN: str = ''
+    NOTIFY_EVENT_TIMEOUT: float = 3.0
+    NOTIFY_EVENT_MAX_ATTEMPTS: int = 3
+
     # --- Логи ---
     # Те же ключи, что у остальных сервисов стенда, и тот же корневой .env:
     # JSON собирает сборщик логов, текст удобнее при локальной отладке.

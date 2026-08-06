@@ -16,10 +16,13 @@
 | **ETL ClickHouse** | `apps/etl-clickhouse/` | `practix-etl-clickhouse` | Конвейер Kafka → ClickHouse | host `9101` → 8000 (`/metrics`) | `etl-clickhouse` |
 | **ETL Elasticsearch** (`etl`) | `apps/etl-elasticsearch/` | `practix-etl-elasticsearch` | Конвейер PostgreSQL → Elasticsearch (не путать с предыдущим) | — | — |
 | **UGC API** (`ugc-api`) | `apps/ugc-api/` | `practix-ugc-api` | Оценки, закладки, рецензии и голоса (4 uvicorn workers) | expose 8000 | `ugc-api` |
+| **Нотификации** | `apps/notifications/` | `practix-notifications` | Панель рассылок менеджера + сборщик писем (ходит в Auth за именем и адресом) + отправитель + планировщик (Django, gunicorn; профиль `notifications`) | `${NOTIFICATIONS_HOST_PORT:-8090}` | `notifications` / `notifications-builder` / `notifications-worker` / `notifications-scheduler` |
+| **Websocket-шлюз** | `apps/notifications-ws/` | `practix-notifications-ws` | Мгновенная доставка уведомлений в открытую вкладку с деградацией на long polling (FastAPI, uvicorn; профиль `notifications`) | `${NOTIFICATIONS_WS_HOST_PORT:-8091}` | `notifications-ws` |
+| **Сокращение ссылок** (`link-shortener`) | `apps/link-shortener/` | `practix-link-shortener` | Короткие ссылки для писем и подтверждение email по ним (4 uvicorn workers). В ЯДРЕ, не в профиле: nginx маршрутизирует `/s/` и без контейнера не стартует | expose 8000 | `link-shortener` |
 | **Nginx** (`nginx`) | `infra/nginx/` | `nginx:1.25.3` | Reverse proxy / балансировщик, точка входа | published **80** | — |
 
-Все шесть Python-сервисов собираются ОДНИМ `infra/docker/python-service.Dockerfile`
-(шесть `--target`). У админки Django свой Dockerfile: она на Python 3.12, вне
+Все девять Python-сервисов собираются ОДНИМ `infra/docker/python-service.Dockerfile`
+(девять `--target`). У админки Django свой Dockerfile: она на Python 3.12, вне
 общего uv workspace и со своим `uv.lock`.
 
 Общий код — библиотеки в `libs/`: `practix-core` (логирование, request-id,
@@ -35,6 +38,8 @@
 | **theatre-db** | `postgres:16` | `5432` | Фильмы (сид из `database_dump.sql`) |
 | **auth-db** | `postgres:16` | host `5433` → `5432` | БД сервиса авторизации |
 | **ugc-db** | `postgres:16` | host `5435` → `5432` | Оценки, закладки, рецензии и голоса. Отдельный экземпляр, чтобы нагрузка UGC не влияла на каталог и на вход в систему |
+| **notifications-db** | `postgres:16` | host `5436` → `5432` | Кампании, шаблоны, журнал доставки (профиль `notifications`) |
+| **shortener-db** | `postgres:16` | host `5437` → `5432` | Короткие ссылки. Отдельный экземпляр, как у UGC и нотификаций: сервис — свой владелец данных |
 | **elasticsearch** | `9.4.1` | `9200` | Поисковый индекс Movies API |
 | **redis** | `redis:7-alpine` | `6379` | Кэш Movies API + denylist/сессии/rate-limit Auth. `maxmemory` + `volatile-lru`: под давлением вытесняются ключи кэша (у них есть TTL) |
 | **redis-ugc** | `redis:7-alpine` | — (только внутри сети) | Аналитика: буфер деградации, rate limit и дедупликация коллектора. Отдельный экземпляр, чтобы многочасовой отказ Kafka не вытеснял сессии Auth. Политика `noeviction` — потерять ещё не доставленные события молча хуже, чем отбросить их с метрикой |
@@ -53,9 +58,9 @@
 | **kibana** | `9.4.1` | `5601` | Просмотр логов, data view `practix-logs-*` |
 | **filebeat** | `9.4.1` | — (только внутри сети) | Читает `/var/lib/docker/containers/*/*.log`, отсеивает чужие проекты и собственные контейнеры ELK |
 
-**Вспомогательные one-shot сервисы:** `auth-migrations` (`alembic upgrade head`), `django-migrations` (`migrate` + `collectstatic` + `createsuperuser`), `kafka-init` (идемпотентное создание топиков UGC), `clickhouse-init` (идемпотентное применение DDL хранилища) и `elasticsearch-logs-init` (шаблон индекса логов — без него тип поля закрепляет тот, кто записал первым). Порядок запуска определяется healthcheck'ами и `depends_on`.
+**Вспомогательные one-shot сервисы:** `auth-migrations` (`alembic upgrade head`), `ugc-migrations` и `shortener-migrations` (то же для своих баз), `django-migrations` (`migrate` + `collectstatic` + `createsuperuser`), `kafka-init` (идемпотентное создание топиков UGC), `clickhouse-init` (идемпотентное применение DDL хранилища) и `elasticsearch-logs-init` (шаблон индекса логов — без него тип поля закрепляет тот, кто записал первым). Порядок запуска определяется healthcheck'ами и `depends_on`.
 
-**Volumes:** `pg_data`, `redis_data`, `redis_ugc_data`, `esdata`, `etl_state`, `static_volume`, `auth_pg_data`, `kafka_0_data`, `kafka_1_data`, `kafka_2_data`, `ch_01_data`…`ch_04_data`, `ch_keeper_01_data`…`ch_keeper_03_data`, `prometheus_data`, `grafana_data`, `glitchtip_pg_data`, `glitchtip_uploads`, `es_logs_data`, `logstash_data`, `kibana_data`, `filebeat_data`.
+**Volumes:** `pg_data`, `redis_data`, `redis_ugc_data`, `esdata`, `etl_state`, `static_volume`, `auth_pg_data`, `ugc_pg_data`, `shortener_pg_data`, `notifications_pg_data`, `kafka_0_data`, `kafka_1_data`, `kafka_2_data`, `ch_01_data`…`ch_04_data`, `ch_keeper_01_data`…`ch_keeper_03_data`, `prometheus_data`, `grafana_data`, `glitchtip_pg_data`, `glitchtip_uploads`, `es_logs_data`, `logstash_data`, `kibana_data`, `filebeat_data`.
 
 > **Ресурсы.** Полный стек — это около двух десятков контейнеров, из них четыре
 > узла ClickHouse. Docker нужно выделить **не менее 12 ГБ RAM**; ограничения

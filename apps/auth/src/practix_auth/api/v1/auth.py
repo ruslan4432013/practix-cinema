@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import select
 
 from practix_auth.api.v1.dependencies import PaginationParams, get_auth_service, get_current_user
@@ -6,6 +6,8 @@ from practix_auth.db.postgres import get_session
 from practix_auth.models.entity import LoginHistory, User
 from practix_auth.models.schemas import LoginHistoryResponse, TokenResponse, UserCreate, UserLogin, UserResponse
 from practix_auth.services.auth_service import AuthService
+from practix_auth.services.notifications_client import emit_user_registered
+from practix_core.context import get_request_id
 
 router = APIRouter()
 
@@ -20,12 +22,26 @@ router = APIRouter()
         status.HTTP_400_BAD_REQUEST: {'description': 'Слабый пароль или пользователь уже существует'},
     },
 )
-async def register(user_data: UserCreate, auth_service: AuthService = Depends(get_auth_service)):
+async def register(
+    user_data: UserCreate,
+    background_tasks: BackgroundTasks,
+    auth_service: AuthService = Depends(get_auth_service),
+):
     try:
         user = await auth_service.register(user_data)
-        return user
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    # Отчётное событие для сервиса нотификаций — ПОСЛЕ коммита и после того, как
+    # ответ сформирован. BackgroundTasks, а не asyncio.create_task: задача из
+    # create_task может быть собрана сборщиком мусора на лету и стартует до того,
+    # как ответ ушёл в сокет.
+    #
+    # request_id снимается СИНХРОННО: middleware сбрасывает ContextVar в finally,
+    # и рассчитывать на то, что фоновая задача увидит его копию, значит
+    # полагаться на внутреннее устройство starlette.
+    background_tasks.add_task(emit_user_registered, user, request_id=get_request_id())
+    return user
 
 
 @router.post(
