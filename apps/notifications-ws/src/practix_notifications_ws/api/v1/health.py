@@ -23,6 +23,7 @@ from fastapi import APIRouter, Response, status
 from pydantic import BaseModel, Field
 
 from practix_notifications_ws.core import redis as redis_db
+from practix_notifications_ws.core.config import settings
 
 # Импортируется МОДУЛЬ, а не имена: `hub` пересоздаётся в lifespan, и
 # `from … import hub` навсегда запомнил бы None, каким он был на импорте.
@@ -40,7 +41,9 @@ class ReadinessResponse(BaseModel):
     broker_connected: bool = Field(description='false означает, что push’и не доезжают и клиенту нужна лента')
     redis_connected: bool = Field(description='false означает, что новые подключения невозможны')
     connections: int = Field(description='Открытых websocket-соединений в этом процессе')
+    connections_limit: int = Field(default=0, description='Потолок соединений на процесс')
     pollers: int = Field(default=0, description='Ждущих long-poll-запросов; бюджет соединений не расходуют')
+    pollers_limit: int = Field(default=0, description='Свой потолок поллеров на процесс, отдельный от соединений')
 
 
 @router.get('/live', response_model=LivenessResponse, summary='Проба живости')
@@ -60,7 +63,10 @@ async def readiness(response: Response) -> ReadinessResponse:
     redis_connected = await redis_db.reachable(await redis_db.get_client())
     connections = providers.hub.total if providers.hub is not None else 0
     # Отдельным числом: поллеры не расходуют бюджет соединений, но их всплеск —
-    # признак того, что сокеты у клиентов не держатся.
+    # признак того, что сокеты у клиентов не держатся. Рядом отдаются потолки:
+    # иначе «1900 поллеров» ничего не говорит без заглядывания в .env. Насыщение
+    # НЕ переводит шлюз в degraded — отказ отдельным клиентам это штатная защита,
+    # а не поломка шлюза.
     pollers = providers.hub.pollers if providers.hub is not None else 0
 
     if not broker_connected and not redis_connected:
@@ -76,5 +82,7 @@ async def readiness(response: Response) -> ReadinessResponse:
         broker_connected=broker_connected,
         redis_connected=redis_connected,
         connections=connections,
+        connections_limit=settings.NOTIFY_WS_MAX_CONNECTIONS,
         pollers=pollers,
+        pollers_limit=settings.NOTIFY_WS_MAX_POLLERS,
     )

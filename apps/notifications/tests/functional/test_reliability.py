@@ -91,15 +91,22 @@ def test_outbox_is_drained_and_marked(campaign, subscriber):
     """Сообщение сначала ложится в базу, и только потом уходит в брокер."""
     run = launch_now(campaign)
     assert run is not None
-    # Строка появляется в той же транзакции, что и прогон.
-    assert OutboxMessage.objects.filter(published_at__isnull=True).count() >= 0
+    # Строка появляется в той же транзакции, что и прогон — то есть существует
+    # уже сейчас, до того как планировщик вообще узнал о ней.
+    assert OutboxMessage.objects.count() == 1
 
     Mailpit.wait_for(count=1)
     wait_until(
         lambda: not OutboxMessage.objects.filter(published_at__isnull=True).exists(),
         message='Планировщик не слил outbox',
     )
-    assert OutboxMessage.objects.filter(published_at__isnull=False).count() == 1
+    published = OutboxMessage.objects.get()
+    assert published.published_at is not None
+    # Аренда не мешает довести строку до конца, а её отметка остаётся видимой:
+    # по паре `available_at`/`published_at` в админке читается, сколько заняла
+    # публикация и не подбирал ли строку сосед по истёкшей аренде.
+    assert published.attempts == 0
+    assert published.available_at is not None
 
 
 def test_delivery_report_is_published(campaign, subscriber):

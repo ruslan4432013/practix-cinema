@@ -58,7 +58,7 @@ class FakeWebSocket:
 @pytest.fixture
 def wired(monkeypatch, redis):
     """Шлюз с настоящим реестром и подменённым внешним миром."""
-    hub = ConnectionHub(queue_size=3, max_per_user=2, max_total=4)
+    hub = ConnectionHub(queue_size=3, max_per_user=2, max_total=4, max_pollers_per_user=3, max_pollers=5)
     monkeypatch.setattr(stream_module, 'get_hub', lambda: hub)
     monkeypatch.setattr(stream_module.redis_db, 'get_client', _const(redis))
     monkeypatch.setattr(guard, 'origin_allowed', lambda origin: True)

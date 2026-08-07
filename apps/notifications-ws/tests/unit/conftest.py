@@ -45,4 +45,4 @@ def redis() -> FakeRedis:
 def hub() -> ConnectionHub:
     """Маленькие лимиты: переполнение и отказ должны достигаться в тесте, а не
     имитироваться подменой констант."""
-    return ConnectionHub(queue_size=3, max_per_user=2, max_total=4)
+    return ConnectionHub(queue_size=3, max_per_user=2, max_total=4, max_pollers_per_user=3, max_pollers=5)

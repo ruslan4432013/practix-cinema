@@ -11,6 +11,13 @@
 «почему у человека 404»: без неё разбор обращения упирается в «кода нет, и
 никогда не было». Отсрочка ``--before-days`` даёт время на разбор.
 
+Почему ПАЧКАМИ. Удаление одним неограниченным запросом на объёмах массовых
+рассылок — это длинная транзакция: блокировки на всех удаляемых строках (а по
+ним же ходит счётчик визитов горячего редиректа), всплеск WAL и отложенный до
+конца autovacuum. Уборка идёт порциями по ``--batch-size`` (по умолчанию
+``SHORTENER_PURGE_BATCH``), каждая — своя короткая транзакция; цикл сам
+останавливается на первой пустой пачке.
+
 Cron'а в стенде нет, поэтому команда ручная — как ``recount`` в UGC.
 """
 
@@ -19,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 import typer
 
+from practix_link_shortener.core.config import settings
 from practix_link_shortener.db.postgres import async_session, engine
 from practix_link_shortener.services.link_service import LinkService
 
@@ -33,15 +41,19 @@ def _root() -> None:
 @cli.command()
 def purge(
     before_days: int = typer.Option(30, '--before-days', min=0, help='Удалять протухшие раньше N дней назад'),
+    batch_size: int | None = typer.Option(
+        None, '--batch-size', min=1, help='Строк в одной транзакции (по умолчанию SHORTENER_PURGE_BATCH)'
+    ),
 ) -> None:
     """Удаляет ссылки, срок действия которых истёк раньше указанного момента."""
 
     async def main() -> int:
         cutoff = datetime.now(UTC) - timedelta(days=before_days)
+        size = batch_size or settings.SHORTENER_PURGE_BATCH
         async with async_session() as session:
-            removed = await LinkService(session).purge_expired(before=cutoff)
+            removed = await LinkService(session).purge_expired(before=cutoff, batch_size=size)
         await engine.dispose()
-        typer.echo(f'Удалено ссылок: {removed} (протухших раньше {cutoff.isoformat()})')
+        typer.echo(f'Удалено ссылок: {removed} (протухших раньше {cutoff.isoformat()}, пачками по {size})')
         return 0
 
     raise typer.Exit(code=asyncio.run(main()))

@@ -1,5 +1,6 @@
 """Создание, резолв и учёт визитов коротких ссылок."""
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -33,6 +34,28 @@ _COUNT_VISIT = text("""
            last_visited_at = now(),
            first_visited_at = coalesce(first_visited_at, now())
      WHERE code = :code
+""")
+
+#: Одна пачка уборки. Неограниченный `DELETE ... WHERE expires_at < :before` —
+#: это одна длинная транзакция: на объёмах массовых рассылок она держит
+#: блокировки на всех удаляемых строках (а по ним же ходит `_COUNT_VISIT`
+#: горячего редиректа), раздувает WAL одним всплеском и откладывает autovacuum
+#: до самого конца. Поэтому удаляем порциями, каждая — своя короткая транзакция.
+#:
+#: Подзапрос идёт по `short_link_expires_at_idx` — индексу, заведённому в
+#: миграции ровно под уборщика, а не под горячий путь (тот ходит по PK).
+#: `FOR UPDATE SKIP LOCKED` нужен, чтобы два одновременных уборщика не вставали
+#: в очередь друг за другом на пересечении своих пачек.
+_PURGE_BATCH = text("""
+    DELETE FROM short_link
+     WHERE code IN (
+         SELECT code
+           FROM short_link
+          WHERE expires_at < :before
+          ORDER BY expires_at
+          LIMIT :batch_size
+            FOR UPDATE SKIP LOCKED
+     )
 """)
 
 
@@ -138,13 +161,34 @@ class LinkService:
         await self.session.execute(_COUNT_VISIT, {'code': code})
         await self.session.commit()
 
-    async def purge_expired(self, *, before: datetime) -> int:
-        """Удалить ссылки, протухшие раньше указанного момента. Возвращает число строк."""
-        result = await self.session.execute(
-            text('DELETE FROM short_link WHERE expires_at < :before'), {'before': before}
-        )
-        await self.session.commit()
-        return result.rowcount or 0
+    async def purge_expired(self, *, before: datetime, batch_size: int | None = None) -> int:
+        """Удалить ссылки, протухшие раньше указанного момента. Возвращает число строк.
+
+        Идём пачками с коммитом на каждую: см. ``_PURGE_BATCH`` о том, почему
+        одним запросом нельзя. Граница строгая (``<``), как и в ``resolve``:
+        момент ``expires_at == before`` в выборку не входит.
+
+        Цикл заведомо конечен, и ограничитель числа итераций тут был бы вреден —
+        он молча оставил бы хвост. Пополнить выборку никто не может: ``before``
+        зафиксирован на весь прогон, а ``expires_at`` новой строки всегда в
+        будущем (``create`` считает его как ``now() + ttl``).
+        """
+        size = batch_size or settings.SHORTENER_PURGE_BATCH
+        removed = 0
+        while True:
+            result = await self.session.execute(_PURGE_BATCH, {'before': before, 'batch_size': size})
+            await self.session.commit()
+            deleted = result.rowcount or 0
+            removed += deleted
+            # Выход по пустой пачке, а НЕ по неполной: со SKIP LOCKED неполная
+            # означает «часть строк занята соседом», а не «строк больше нет».
+            if deleted == 0:
+                break
+            if settings.SHORTENER_PURGE_SLEEP:
+                await asyncio.sleep(settings.SHORTENER_PURGE_SLEEP)
+        if removed:
+            logger.info('Убрано протухших ссылок: %s (раньше %s)', removed, before.isoformat())
+        return removed
 
     async def _revive(self, link: ShortLink, expires_at: datetime) -> ShortLink:
         """Продлить ссылку, если повтор пришёл после её смерти.

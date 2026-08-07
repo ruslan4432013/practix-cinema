@@ -30,7 +30,28 @@ logger = logging.getLogger('notifications.broker')
 
 
 class PublishFailed(Exception):
-    """Брокер не подтвердил приём сообщения."""
+    """Брокер не подтвердил приём сообщения.
+
+    Базовый тип оставлен на месте: ``except PublishFailed`` стоит в воркере,
+    сборщике и тестах, и все они должны продолжать работать без правок.
+    """
+
+
+class Unroutable(PublishFailed):
+    """У ключа маршрутизации нет ни одной привязки — доставить некуда.
+
+    Ожиданием НЕ лечится. Брокер при этом жив и здоров, поэтому вызывающему
+    правильно пропустить это сообщение и заняться следующим, а не считать, что
+    встала вся публикация.
+    """
+
+
+class BrokerUnavailable(PublishFailed):
+    """Брокер не ответил или разорвал соединение. Лечится ожиданием.
+
+    Следующее сообщение упрётся в то же самое, поэтому вызывающему правильно
+    остановиться до следующего тика.
+    """
 
 
 class BrokerConnection:
@@ -62,6 +83,14 @@ class BrokerConnection:
         # heartbeat уронил бы канал ровно в момент отправки, переотправив пачку.
         parameters.heartbeat = settings.NOTIFY_AMQP_HEARTBEAT
         parameters.blocked_connection_timeout = settings.NOTIFY_AMQP_BLOCKED_TIMEOUT
+        # Дедлайн ПОДКЛЮЧЕНИЯ. Без него ожидание TCP отмеряет ядро, а это минуты
+        # на blackhole — и всё это время стоит единственный поток планировщика,
+        # где за публикацией в очереди тик расписаний, часовые чистки и веер.
+        # Самый частый отказ здесь — перезапуск RabbitMQ, то есть именно молчание
+        # на SYN. Heartbeat выше от него не спасает: он начинает работать после
+        # того, как соединение поднялось.
+        parameters.socket_timeout = settings.NOTIFY_AMQP_SOCKET_TIMEOUT
+        parameters.stack_timeout = settings.NOTIFY_AMQP_STACK_TIMEOUT
         self._connection = pika.BlockingConnection(parameters)
         self._channel = self._connection.channel()
         # Подтверждения включаются один раз на канал.
@@ -145,12 +174,12 @@ class BrokerConnection:
                 mandatory=mandatory,
             )
         except UnroutableError as exc:
-            raise PublishFailed(f'Нет привязки под ключ {routing_key!r}: сообщение некуда доставить') from exc
+            raise Unroutable(f'Нет привязки под ключ {routing_key!r}: сообщение некуда доставить') from exc
         except AMQPError as exc:
             # Канал после ошибки протокола непригоден — уронить его, чтобы
             # следующий вызов переподключился.
             self.close()
-            raise PublishFailed(f'Брокер не подтвердил публикацию: {exc}') from exc
+            raise BrokerUnavailable(f'Брокер не подтвердил публикацию: {exc}') from exc
 
     def republish_to_retry(
         self, *, body: dict[str, Any], headers: dict[str, Any], attempt: int, routing_key: str

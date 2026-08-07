@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     #: Потолок для клиентского ``?wait=``. Больше — и запрос переживёт таймаут
     #: любого промежуточного прокси, а клиент получит обрыв вместо пустого ответа.
     NOTIFY_WS_POLL_MAX_TIMEOUT: float = Field(default=55.0, ge=1.0)
+    #: Свой бюджет поллеров, отдельный от сокетного. Вдвое больше, чем сокетов на
+    #: человека: брошенный клиентом ``/poll`` живёт на сервере до
+    #: ``NOTIFY_WS_POLL_MAX_TIMEOUT`` и штатно пересекается с уже переоткрытым
+    #: следующим, так что мгновенных «лишних» запросов у честного клиента больше.
+    NOTIFY_WS_MAX_POLLERS_PER_USER: int = Field(default=10, ge=1)
+    #: Общий потолок ниже сокетного: поллер дороже — HTTP-запрос плюс задача плюс
+    #: очередь на ``NOTIFY_WS_QUEUE_SIZE`` кадров, и всё это в одном воркере.
+    NOTIFY_WS_MAX_POLLERS: int = Field(default=2_000, ge=1)
 
     # --- Политика деградации, которую шлюз ОБЪЯВЛЯЕТ клиенту ---
     # Значения отдаются в ответе на выдачу ticket'а, чтобы поведение фронтенда
@@ -136,6 +144,8 @@ class Settings(BaseSettings):
             )
         if self.NOTIFY_WS_POLL_TIMEOUT > self.NOTIFY_WS_POLL_MAX_TIMEOUT:
             raise ValueError('NOTIFY_WS_POLL_TIMEOUT must not exceed NOTIFY_WS_POLL_MAX_TIMEOUT')
+        if self.NOTIFY_WS_MAX_POLLERS_PER_USER > self.NOTIFY_WS_MAX_POLLERS:
+            raise ValueError('NOTIFY_WS_MAX_POLLERS_PER_USER must not exceed NOTIFY_WS_MAX_POLLERS')
         if normalized == 'prod' and self.insecure_defaults:
             raise ValueError(
                 'Insecure default values must be overridden in production: ' + '; '.join(self.insecure_defaults)

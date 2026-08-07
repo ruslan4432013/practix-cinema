@@ -43,6 +43,12 @@ class AuthClient:
     def __init__(self, base_url: str | None = None) -> None:
         self._base_url = (base_url or settings.SHORTENER_AUTH_API_URL).rstrip('/')
         self._token: str | None = None
+        # Замок вокруг получения токена. Клиент один на процесс, а переходы по
+        # ссылкам идут параллельно: без замка в момент протухания каждая
+        # корутина увидела бы `self._token` пустым и ушла бы логиниться сама —
+        # пачка одновременных /auth/login ровно тогда, когда Auth и так под
+        # нагрузкой (и лишние записи в `user:{id}:sessions` на каждый вход).
+        self._token_lock = asyncio.Lock()
         # Один клиент на процесс: TCP+TLS-рукопожатие на каждый переход по
         # ссылке заметно дороже самого запроса.
         self._client = httpx.AsyncClient(timeout=settings.SHORTENER_AUTH_TIMEOUT)
@@ -71,9 +77,33 @@ class AuthClient:
         self._token = token
         return token
 
+    async def _token_for(self, stale: str | None = None) -> str:
+        """Действующий токен. Логинится максимум одна корутина, прочие ждут её.
+
+        ``stale`` — токен, на котором только что прилетела 401. Сравнение с ним
+        вместо ``self._token = None`` не даёт опоздавшей корутине выбросить
+        свежий токен, который сосед уже успел получить, и тем самым запустить
+        второй круг входов: перелогинивается только тот, кто первым принёс
+        негодное значение.
+
+        Быстрая проверка ДО замка неслучайна: на горячем пути токен есть всегда,
+        и брать замок на каждый переход по ссылке незачем.
+        """
+        token = self._token
+        if token is not None and token != stale:
+            return token
+
+        async with self._token_lock:
+            token = self._token
+            if token is not None and token != stale:
+                # Пока мы ждали замок, сосед уже вошёл — его токен и берём.
+                return token
+            return await self._login()
+
     async def _post(self, path: str) -> dict:
         url = f'{self._base_url}{path}'
         last_error: Exception | None = None
+        stale: str | None = None
 
         for attempt in range(settings.SHORTENER_AUTH_MAX_ATTEMPTS):
             try:
@@ -82,7 +112,7 @@ class AuthClient:
                 # ручке редиректа — то есть человек с письмом получал бы голую
                 # 500 вместо страницы 503 с Retry-After. Это ровно тот случай,
                 # ради которого заведён ConfirmUnavailable.
-                token = self._token or await self._login()
+                token = await self._token_for(stale)
                 response = await self._client.post(url, headers=self._headers(token))
             except httpx.HTTPError as exc:
                 last_error = exc
@@ -91,8 +121,12 @@ class AuthClient:
 
             if response.status_code == 401:
                 # Токен протух — переполучаем и повторяем. Именно 401: 403
-                # означало бы «роль отобрали», и повтор бы не помог.
-                self._token = None
+                # означало бы «роль отобрали», и повтор бы не помог. Помечаем
+                # негодным конкретное значение, а не обнуляем кэш: обнуление
+                # затёрло бы токен, который параллельная корутина могла уже
+                # обновить, и вернуло бы ровно ту пачку входов, от которой
+                # заведён `_token_lock`.
+                stale = token
                 last_error = ConfirmMisconfigured('Auth ответил 401 на подтверждение')
                 continue
             if response.status_code == 403:

@@ -71,6 +71,8 @@ async def lifespan(app: FastAPI):
         queue_size=settings.NOTIFY_WS_QUEUE_SIZE,
         max_per_user=settings.NOTIFY_WS_MAX_CONNECTIONS_PER_USER,
         max_total=settings.NOTIFY_WS_MAX_CONNECTIONS,
+        max_pollers_per_user=settings.NOTIFY_WS_MAX_POLLERS_PER_USER,
+        max_pollers=settings.NOTIFY_WS_MAX_POLLERS,
     )
     redis_db.client = redis_db.create_client()
     if not await redis_db.reachable(redis_db.client):

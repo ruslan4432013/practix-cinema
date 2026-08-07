@@ -316,6 +316,23 @@ class OutboxMessage(models.Model):
     body = models.JSONField()
     headers = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    #: «Не трогать раньше этого момента»; ``NULL`` — свободна прямо сейчас.
+    #:
+    #: Одна колонка на две роли, потому что предикат выборки у них общий:
+    #:
+    #: * АРЕНДА — реплика планировщика ставит её в будущее перед публикацией и
+    #:   уходит разговаривать с брокером ВНЕ транзакции. Именно она, а не
+    #:   блокировка строки, разводит две реплики: держать ``SELECT FOR UPDATE``
+    #:   всё время сетевого разговора значит держать открытую транзакцию и
+    #:   занятое соединение из пула столько же;
+    #: * ОТСРОЧКА — после неудачной публикации сюда кладётся экспоненциальный
+    #:   backoff. Без него потолок попыток измерялся в секундах: слив крутится
+    #:   раз в секунду, и короткая недоступность брокера навсегда выкидывала
+    #:   исправную строку из выборки.
+    #:
+    #: Различить роли глазами можно по ``attempts``/``last_error``: у
+    #: арендованной строки они не менялись.
+    available_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)
     last_error = models.TextField(blank=True, default='')
@@ -327,7 +344,11 @@ class OutboxMessage(models.Model):
         ordering = ['created_at']
         indexes = [
             # Частичный индекс: слив читает только неопубликованные, а их всегда
-            # единицы на фоне всей истории публикаций.
+            # единицы на фоне всей истории публикаций. Появившиеся в выборке
+            # слива предикаты по `available_at` и `attempts` его не требуют
+            # расширять и не попадают в него намеренно: он уже сузил таблицу до
+            # единиц строк, там любой доотбор стоит ничего, а `include=` был бы
+            # ещё и только-постгресовым — юнит-набор ходит по SQLite.
             models.Index(
                 fields=['created_at'],
                 name='outbox_unpublished_idx',
