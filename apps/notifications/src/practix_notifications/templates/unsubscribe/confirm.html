@@ -1,0 +1,39 @@
+{# Промежуточная страница отписки.
+
+   Существует ради одной вещи: чтобы отписка происходила по POST. По ссылке из
+   письма первым ходит не человек, а Safe Links, антивирусный шлюз или
+   префетчер почтового клиента — и отписка по GET означала бы аудиторию,
+   тающую сама по себе. Кнопка отсекает их всех разом. #}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Practix — отписка от писем</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 15px/1.6 system-ui, sans-serif; margin: 0; padding: 48px 24px; max-width: 560px; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    p { margin: 0 0 20px; }
+    code { font-family: ui-monospace, monospace; }
+    button { font: inherit; padding: 8px 18px; border-radius: 6px; border: 1px solid #8886; cursor: pointer; }
+    .hint { opacity: .7; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Отписаться от этих писем?</h1>
+  <p>
+    {% if email %}Адрес <code>{{ email }}</code> больше не будет получать письма этой рассылки.
+    {% else %}Вы больше не будете получать письма этой рассылки.{% endif %}
+  </p>
+  {# Пустой action — это «тот же адрес»: подписанный токен уже в нём, и
+     повторять его в разметке незачем. Заодно не нужен context processor. #}
+  <form method="post" action="">
+    <button type="submit">Отписаться</button>
+  </form>
+  <p class="hint">
+    Транзакционные письма — подтверждение адреса, чеки — приходят независимо от этой настройки.
+    Изменить её можно в личном кабинете.
+  </p>
+</body>
+</html>

@@ -1,7 +1,8 @@
+import uuid
 from datetime import datetime
 
 from async_fastapi_jwt_auth import AuthJWT
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from practix_auth.core.config import settings
@@ -10,6 +11,23 @@ from practix_auth.models.entity import LoginHistory, Role, User
 from practix_auth.models.schemas import UserCreate
 from practix_auth.services.security import check_password_strength, hash_password, verify_password
 from practix_auth.services.user_agent import detect_device_type
+
+#: Подтверждение адреса одним оператором. ``prev`` берёт строку под
+#: ``FOR UPDATE``, поэтому два одновременных перехода по ссылке (человек и
+#: сканер почтового клиента) выстраиваются в очередь, а не подтверждают дважды.
+#: Пустой результат означает «пользователя нет» — этим сырым SQL и отличается
+#: от ORM-версии, где пришлось бы отдельно проверять существование.
+_CONFIRM_EMAIL = text("""
+    WITH prev AS (
+        SELECT id, email_verified FROM users WHERE id = :user_id FOR UPDATE
+    )
+    UPDATE users u
+       SET email_verified = true,
+           email_verified_at = coalesce(u.email_verified_at, now())
+      FROM prev
+     WHERE u.id = prev.id
+    RETURNING prev.email_verified AS was_verified
+""")
 
 
 class AuthService:
@@ -30,7 +48,13 @@ class AuthService:
             raise ValueError('Пользователь с таким логином или email уже существует')
 
         hashed_pwd = hash_password(user_create.password)
-        new_user = User(login=user_create.login, email=user_create.email, password=hashed_pwd)
+        new_user = User(
+            login=user_create.login,
+            email=user_create.email,
+            password=hashed_pwd,
+            first_name=user_create.first_name,
+            last_name=user_create.last_name,
+        )
 
         # Назначение роли по умолчанию
         role_result = await self.db.execute(select(Role).where(Role.name == settings.DEFAULT_ROLE_NAME))
@@ -157,8 +181,13 @@ class AuthService:
 
         if new_login:
             user.login = new_login
-        if new_email:
+        if new_email and new_email != user.email:
             user.email = new_email
+            # Подтверждён был СТАРЫЙ адрес. Оставить флаг — значит объявить
+            # подтверждённым ящик, который человек, возможно, не открывал ни
+            # разу; на этом строятся восстановление пароля и рассылка.
+            user.email_verified = False
+            user.email_verified_at = None
 
         await self.db.commit()
         await self.db.refresh(user)
@@ -201,3 +230,69 @@ class AuthService:
         for jti in jtis:
             await redis.set(jti, 'revoked', ex=settings.REFRESH_TOKEN_EXPIRES)
         await redis.delete(sessions_key)
+
+    async def list_users(self, *, limit: int, offset: int) -> tuple[list[User], int]:
+        """Страница пользователей для межсервисной выгрузки.
+
+        Нужна сервису нотификаций: он держит СВОЮ витрину контактов и обновляет
+        её периодической синхронизацией, чтобы рассылка на десятки тысяч адресов
+        не ходила в Auth за каждым получателем и не роняла вместе с ним логин на
+        всём сайте.
+
+        Сортировка по ``created_at, id`` — стабильная: без неё две соседние
+        страницы могут вернуть одну и ту же запись и пропустить другую.
+        """
+        total = await self.db.scalar(select(func.count()).select_from(User))
+        stmt = select(User).order_by(User.created_at, User.id).limit(limit).offset(offset)
+        result = await self.db.execute(stmt)
+        return list(result.scalars().unique().all()), int(total or 0)
+
+    async def lookup_users(self, ids: list[uuid.UUID]) -> list[User]:
+        """Личные данные пачкой по списку id.
+
+        Это то, чем воркер рассылки персонифицирует письмо: у него на руках
+        только ``user_id``, а имя, фамилия и адрес живут здесь. Один запрос на
+        пачку, а не по запросу на получателя, — иначе рассылка превращается в
+        поток из тысяч обращений и кладёт вход на сайт вместе с собой.
+
+        ``roles`` подгружается ``lazy='selectin'``, то есть добавляет ровно один
+        запрос на всю пачку, а не по одному на пользователя.
+        """
+        stmt = select(User).where(User.id.in_(ids)).order_by(User.id)
+        result = await self.db.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def confirm_email(self, user_id: uuid.UUID) -> bool | None:
+        """Пометить адрес подтверждённым.
+
+        Возвращает ``True``, если подтверждение произошло сейчас, ``False`` —
+        если адрес уже был подтверждён, и ``None``, если пользователя нет.
+
+        Один оператор вместо «прочитать — проверить — записать»: между чтением и
+        записью успевает пройти второй клик (или префетч почтового клиента).
+        CTE нужна ровно затем, чтобы вернуть ПРЕЖНЕЕ значение — RETURNING отдаёт
+        новое, а вызывающему нужно отличить первое подтверждение от повторного.
+        ``coalesce`` сохраняет момент первого: повторный переход не переписывает
+        историю.
+        """
+        result = await self.db.execute(_CONFIRM_EMAIL, {'user_id': user_id})
+        row = result.first()
+        await self.db.commit()
+        if row is None:
+            return None
+        return not row.was_verified
+
+    async def update_profile(self, *, user: User, first_name: str | None, last_name: str | None) -> User:
+        """Смена имени и фамилии.
+
+        ``None`` означает «не трогать», а не «очистить»: PATCH обязан уметь
+        менять одно поле, не зная про второе.
+        """
+        if first_name is not None:
+            user.first_name = first_name
+        if last_name is not None:
+            user.last_name = last_name
+
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user

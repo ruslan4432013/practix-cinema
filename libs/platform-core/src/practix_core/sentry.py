@@ -47,6 +47,7 @@ Jaeger по ``trace_id``, а строки лога — по ``request_id``.
 """
 
 import logging
+import os
 from collections.abc import Callable, Mapping, Sequence
 
 import sentry_sdk
@@ -209,3 +210,38 @@ def init_sentry(
         service_name,
         extra={'service': service_name, 'environment': environment},
     )
+
+
+def init_sentry_from_env(*, service_name: str) -> None:
+    """``init_sentry``, читающий ``SENTRY_*`` прямо из окружения.
+
+    Ключи сбора ошибок в этом репозитории идут БЕЗ префикса сервиса — приёмник
+    один на весь стенд, а различает сервисы тег ``service``. Поэтому блок из
+    семи именованных аргументов был побайтово одинаков у всех, кто его писал:
+    отличалось только имя переменной настроек, из которой брали значение.
+
+    Тот же приём и та же причина, что у ``logging.build_logging_config_from_env``.
+    Сервис, который хочет управлять этим из своих настроек, по-прежнему зовёт
+    ``init_sentry`` напрямую — функция ничего не запрещает, а лишь избавляет от
+    седьмой копии одного и того же вызова.
+    """
+    init_sentry(
+        enabled=_flag('SENTRY_ENABLED', default=False),
+        dsn=os.environ.get('SENTRY_DSN', ''),
+        service_name=service_name,
+        environment=os.environ.get('SENTRY_ENVIRONMENT', 'dev'),
+        release=os.environ.get('SENTRY_RELEASE', ''),
+        sample_rate=float(os.environ.get('SENTRY_SAMPLE_RATE', '1.0')),
+        send_default_pii=_flag('SENTRY_SEND_DEFAULT_PII', default=False),
+    )
+
+
+def _flag(name: str, *, default: bool) -> bool:
+    """Булев ключ окружения.
+
+    Разбор тот же, что у ``logging.json_output_from_env``, и по той же причине:
+    ``bool('False')`` истинно, и наивная версия включала бы то, что явно
+    выключили.
+    """
+    raw = os.environ.get(name, str(default))
+    return raw.strip().lower() not in ('0', 'false', 'no', '')

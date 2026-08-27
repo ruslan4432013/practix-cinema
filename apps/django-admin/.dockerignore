@@ -1,0 +1,22 @@
+# Контекст сборки здесь СВОЙ — `apps/django-admin`, а не корень репозитория
+# (см. цель `docker` в project.json). Корневой .dockerignore на него не
+# распространяется: Docker читает файл из каталога контекста и ниоткуда больше.
+#
+# Без этого файла `COPY . .` в конце Dockerfile кладёт поверх собранного
+# `uv sync`'ом `/opt/app/.venv` хостовый — макосный, с
+# `home = /Library/Frameworks/Python.framework/...` внутри. Образ собирается
+# зелёным, а `django-migrations` падает на старте с `No module named 'django'`,
+# потому что бинарники и site-packages в нём от другой ОС. `.gitignore` тут не
+# помогает: Docker его не читает.
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+
+# Секреты хоста в образ не едут: `.env` внутрь контейнера подставляет compose,
+# а entrypoint при нужде копирует `.env.example`.
+.env
+
+.git
+.idea

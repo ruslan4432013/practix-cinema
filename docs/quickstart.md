@@ -16,14 +16,22 @@ $DC up -d --build
 #   + --profile warehouse       ClickHouse, Keeper, ETL ClickHouse
 #   + --profile observability   Prometheus, Grafana, Kafka UI, GlitchTip
 #   + --profile logging         Elasticsearch (логи), Logstash, Kibana, Filebeat
+#   + --profile notifications   Панель рассылок, воркер, планировщик, RabbitMQ, Mailpit
+#                               ПРОФИЛЬ ОБЯЗАН ПОВТОРЯТЬСЯ И НА `down -v` — иначе
+#                               контейнеры и тома переживают teardown.
 
 # 2. Заполнить theatre-db тестовыми данными (110 жанров / 5 000 персон / 200 000 фильмов)
 uv run --with psycopg2-binary --with faker python seed_db.py
 
 # 3. Создать суперпользователя в сервисе Auth (идемпотентно; создаёт роль 'admin', если её нет).
-#    Подкоманды createsuperuser НЕТ: Typer схлопывает приложение с единственной командой.
-$DC exec auth python -m practix_auth.cli \
+#    Подкоманда пишется явно: команд в CLI две, схлопывание Typer снято callback'ом.
+$DC exec auth python -m practix_auth.cli createsuperuser \
     --login admin --email admin@example.com --password 'Admin12345!'
+
+# 3a. Служебная учётка сервиса сокращения ссылок — узкая роль вместо admin.
+$DC exec auth python -m practix_auth.cli create-service-account \
+    --login svc-link-shortener --email svc-link-shortener@example.com \
+    --password 'Svc-Short123!' --role email-confirmer
 
 # 4. Проверить сквозной путь события: отправить клик и найти его в ClickHouse
 curl -X POST http://localhost/api/v1/events/click -H 'Content-Type: application/json' \
@@ -70,6 +78,10 @@ ETL автоматически перенесёт данные из PostgreSQL �
 - Grafana — http://localhost:3000, дашборд «UGC ETL → ClickHouse» (`admin` / `$GF_SECURITY_ADMIN_PASSWORD`)
 - ClickHouse HTTP — http://localhost:8123 (узлы 2–4 на портах 8124–8126)
 - Kibana — http://localhost:5601 (профиль `logging`), Elasticsearch логов — http://localhost:9210
+- Панель рассылок — http://localhost:8090/admin/ (профиль `notifications`, вход `admin`/`admin`),
+  RabbitMQ — http://localhost:15672, принятые письма — http://localhost:8025
+- Витрина деградации websocket → long polling → лента — http://localhost:8090/demo/cabinet
+  (профиль `notifications`; websocket-шлюз слушает http://localhost:8091)
 
 ## Проверка отказоустойчивости ETL
 

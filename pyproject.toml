@@ -40,6 +40,10 @@ practix-search-schema = { workspace = true }
 # репозитории — нигде.
 dev = [
     "ruff==0.14.2",
+    # Второй линтер, и он НЕ дублирует ruff: ruff — гейт (красный ломает сборку),
+    # wemake — советник, отчёт которого выгружается артефактом CI. Разделение и
+    # список исключений — в .flake8 и docs/quality.md.
+    "wemake-python-styleguide==1.7.1",
     "mypy>=1.18.2",
     "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",
@@ -61,6 +65,9 @@ extend-exclude = [
     "node_modules",
     "**/migrations/versions/**",              # автогенерация Alembic
     "apps/django-admin/*/migrations/**",      # автогенерация Django
+    # Django-приложения нотификаций лежат внутри пакета, и обе маски выше их НЕ
+    # покрывают: `versions/` — это Alembic, а `apps/django-admin/*/` — другой путь.
+    "apps/notifications/src/practix_notifications/*/migrations/**",
     "sqlite_to_postgres",
     "schema_design",
 ]
@@ -110,6 +117,7 @@ ignore = [
 # Django: атрибуты Meta и списки полей — часть фреймворка, а не изменяемые
 # значения по умолчанию в смысле RUF012.
 "apps/django-admin/**" = ["RUF012"]
+"apps/notifications/**" = ["RUF012"]
 #
 # Исключение E402 для tests/functional/auth/conftest.py УДАЛЕНО: оно требовалось
 # из-за правки sys.path перед импортами приложения, а с переходом сервисов в
@@ -132,6 +140,9 @@ known-first-party = [
     "practix_etl_clickhouse",
     "practix_etl_elasticsearch",
     "practix_ugc_api",
+    "practix_notifications",
+    "practix_notifications_ws",
+    "practix_link_shortener",
 ]
 
 [tool.ruff.format]

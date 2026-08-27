@@ -8,12 +8,12 @@ Auth-сервис лежит. Падение Auth не выводит из ст�
 """
 
 import logging
-import time
 
 import requests
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.backends import BaseBackend
+from example.http_retry import request_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -25,22 +25,14 @@ STAFF_ROLES = {'admin', 'superuser'}
 
 
 def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
-    """HTTP-запрос с ограниченными ретраями и экспоненциальной задержкой."""
-    attempts = getattr(settings, 'AUTH_API_MAX_ATTEMPTS', 3)
-    timeout = getattr(settings, 'AUTH_API_TIMEOUT', 2.0)
-    delay = 0.1
-    last_exc: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            return requests.request(method, url, timeout=timeout, **kwargs)
-        except requests.RequestException as exc:
-            last_exc = exc
-            logger.warning('Запрос к Auth-сервису не удался (%s), попытка %d', exc, attempt + 1)
-            if attempt + 1 < attempts:
-                time.sleep(delay)
-                delay *= 2
-    assert last_exc is not None
-    raise last_exc
+    """HTTP-запрос к Auth-сервису с ретраями по его настройкам таймаута."""
+    return request_with_retry(
+        method,
+        url,
+        attempts=getattr(settings, 'AUTH_API_MAX_ATTEMPTS', 3),
+        timeout=getattr(settings, 'AUTH_API_TIMEOUT', 2.0),
+        **kwargs,
+    )
 
 
 class AuthServiceBackend(BaseBackend):

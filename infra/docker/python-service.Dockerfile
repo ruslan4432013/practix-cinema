@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Один файл на все шесть Python-сервисов. До этого было пять Dockerfile'ов, из
+# Один файл на все восемь Python-сервисов. До этого было пять Dockerfile'ов, из
 # которых четыре — один шаблон с подставленными значениями, с побайтово
 # одинаковой четырёхстрочной шапкой. Ни один не использовал multi-stage, кеш
 # BuildKit или общий базовый слой, поэтому каждый сервис заново ставил весь свой
@@ -57,6 +57,9 @@ COPY apps/analytics-collector/pyproject.toml  apps/analytics-collector/
 COPY apps/etl-clickhouse/pyproject.toml       apps/etl-clickhouse/
 COPY apps/etl-elasticsearch/pyproject.toml    apps/etl-elasticsearch/
 COPY apps/ugc-api/pyproject.toml              apps/ugc-api/
+COPY apps/notifications/pyproject.toml        apps/notifications/
+COPY apps/notifications-ws/pyproject.toml     apps/notifications-ws/
+COPY apps/link-shortener/pyproject.toml       apps/link-shortener/
 
 # --locked: сборка ПАДАЁТ на устаревшем локе. Это и есть замена никогда не
 # существовавшему constraints.txt — утверждение, проверяемое на сборке, а не
@@ -144,3 +147,60 @@ FROM runtime AS ugc-api
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
   CMD python -c "import sys,urllib.request as u; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id':'healthcheck'}); sys.exit(0 if u.urlopen(r,timeout=3).status==200 else 1)"
 CMD ["uvicorn", "practix_ugc_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+
+FROM runtime AS notifications
+# Единственный WSGI-сервис в этом файле — и единственный, где статику отдаёт сам
+# процесс (whitenoise): django-admin получает CSS админки от nginx через общий том
+# static_volume, а нотификации живут в профиле и публикуются прямым хост-портом.
+#
+# gunicorn, а не uwsgi: uwsgi собирается из исходников против libpcre2, и это ровно
+# та причина, по которой django-admin остался на Python 3.12 вне workspace'а. Здесь
+# зависимость чисто питоновская, поэтому образ строится общей стадией deps.
+#
+# X-Request-Id в пробе не обязателен — middleware работает в режиме
+# «сгенерировать, если нет», иначе браузер получал бы 400 на каждой странице
+# админки (nginx перед сервисом нет и заголовок проставить некому). Заголовок в
+# пробе всё равно ставим: так в логах healthcheck отличим от живого трафика.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=25s --retries=12 \
+  CMD python -c "import sys,urllib.request as u; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id':'healthcheck'}); sys.exit(0 if u.urlopen(r,timeout=3).status==200 else 1)"
+# collectstatic выполняется ЗДЕСЬ, а не в one-shot контейнере миграций. Тот
+# отрабатывает и исчезает вместе со своей файловой системой, а STATIC_ROOT общим
+# томом не является — админка получала бы 500 на каждой странице
+# («Missing staticfiles manifest entry for admin/css/base.css»), потому что
+# манифест ManifestStaticFilesStorage существует только там, где собирали.
+CMD ["sh", "-c", "python -m practix_notifications.manage collectstatic --no-input >/dev/null && exec gunicorn practix_notifications.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 60 --access-logfile - --access-logformat '%({X-Request-Id}i)s %(m)s %(U)s %(s)s %(D)s'"]
+
+FROM runtime AS notifications-ws
+# Восьмой сервис и единственный, у которого соединения живут часами.
+#
+# --workers 1: реестр открытых соединений живёт В ПАМЯТИ ПРОЦЕССА, и второй
+# воркер — это второй реестр, который о первом ничего не знает. Работать это
+# всё равно будет (каждый процесс объявляет свою очередь на fanout-обменнике и
+# получает копию каждого push'а), но лимиты на пользователя и счётчики в
+# /health/ready считались бы по половине соединений каждый. Масштабирование —
+# репликами контейнера, у которых та же схема раздачи и честные счётчики.
+#
+# uvicorn[standard] в зависимостях обязателен: без него у uvicorn нет реализации
+# websocket-протокола, и handshake отвечает 404 «Unsupported upgrade request».
+#
+# X-Request-Id в пробе не обязателен (middleware в режиме «сгенерировать, если
+# нет» — nginx перед шлюзом нет), но ставится, чтобы healthcheck отличался в
+# логах от живого трафика. Проба идёт на /health/live: /health/ready зависит от
+# брокера, а его недоступность — это degraded, а не повод перезапустить процесс
+# и оборвать все открытые сокеты.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
+  CMD python -c "import sys,urllib.request as u; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id':'healthcheck'}); sys.exit(0 if u.urlopen(r,timeout=3).status==200 else 1)"
+CMD ["uvicorn", "practix_notifications_ws.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+FROM runtime AS link-shortener
+# Девятый сервис. Работа на горячем пути — один поиск по первичному ключу, так
+# что воркеров хватает четырёх: упирается он в базу, а не в процессор.
+#
+# X-Request-Id в пробе не обязателен: middleware работает в режиме
+# «сгенерировать, если нет» — маршрут /s/{code} открывает браузер по ссылке из
+# письма, и заголовка там нет. Ставим его всё равно, чтобы healthcheck отличался
+# в логах от живого трафика. Проба идёт на /health/live: перезапуск контейнера
+# не чинит упавший PostgreSQL.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
+  CMD python -c "import sys,urllib.request as u; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id':'healthcheck'}); sys.exit(0 if u.urlopen(r,timeout=3).status==200 else 1)"
+CMD ["uvicorn", "practix_link_shortener.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

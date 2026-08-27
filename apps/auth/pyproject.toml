@@ -29,8 +29,10 @@ test = [
 ]
 
 [project.scripts]
-# Заменяет `python -m src.cli`. Осторожно: у Typer-приложения с ОДНОЙ командой
-# имя подкоманды не принимается — вызов идёт как `practix-auth --login ...`.
+# Заменяет `python -m practix_auth.cli`. Подкоманда пишется явно
+# (`practix-auth createsuperuser --login ...`): команд две, и схлопывание Typer
+# снято пустым callback'ом — раньше при единственной команде имя подкоманды не
+# принималось вовсе.
 practix-auth = "practix_auth.cli:cli"
 
 [build-system]

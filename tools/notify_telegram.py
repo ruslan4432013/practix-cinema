@@ -53,6 +53,7 @@ SEND_TIMEOUT = 30
 JOB_TITLES = {
     'checks': 'проверки (линтер, типы, юнит-тесты)',
     'affected-suites': 'выбор затронутых наборов',
+    'lint-report': 'HTML-отчёт по линтерам',
     'duplication': 'дублирование кода',
     'functional': 'функциональные тесты',
 }

@@ -1,0 +1,36 @@
+[project]
+name = "practix-notifications-ws"
+version = "1.0.0"
+description = "Websocket-шлюз мгновенных уведомлений с деградацией на long polling"
+requires-python = ">=3.13"
+dependencies = [
+    "practix-core[asgi,fastapi,otel,jwt,sentry]",
+    "fastapi>=0.137.1",
+    # ИМЕННО [standard]. Голый uvicorn ставится без websockets/wsproto, и
+    # websocket-маршрут молча отвечает 404 «Unsupported upgrade request» —
+    # ошибка, которую видно только в рантайме и только на handshake.
+    "uvicorn[standard]>=0.49.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "async-fastapi-jwt-auth>=0.6.6",
+    # Асинхронный AMQP. pika, на которой построен сервис нотификаций, блокирующая:
+    # в event loop шлюза она остановила бы все открытые сокеты на время сетевого
+    # вызова. Тот же довод, по которому теория запрещает websocket на синхронном
+    # сервере, применим и к клиенту брокера внутри шлюза.
+    "aio-pika>=9.5.7",
+    # Денилист отозванных токенов (Redis Auth-сервиса) и одноразовые ticket'ы.
+    "redis>=8.0.0",
+]
+
+[dependency-groups]
+test = [
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/practix_notifications_ws"]

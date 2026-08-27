@@ -31,6 +31,13 @@ EXPECTED: dict[str, set[str]] = {
     'analytics-collector': {'platform-core', 'analytics-contracts', 'testing'},
     'etl-clickhouse': {'platform-core', 'analytics-contracts', 'testing'},
     'ugc-api': {'platform-core', 'testing'},
+    'notifications': {'platform-core', 'testing'},
+    # Без ребра на testing: функциональных тестов у шлюза своих НЕТ. Сквозной
+    # путь (событие → веер → сборка → push → сокет) проверяется набором
+    # нотификаций, где уже стоит весь стенд, — вторая копия его conftest.py
+    # (450 строк обвязки) стала бы крупнейшим дублированием в репозитории.
+    'notifications-ws': {'platform-core'},
+    'link-shortener': {'platform-core', 'testing'},
     'etl-elasticsearch': {'platform-core', 'search-schema'},
     'analytics-contracts': set(),
     'platform-core': set(),

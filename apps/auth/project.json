@@ -10,6 +10,11 @@
   ],
   "targets": {
     "lint": {},
+    "test": {
+      "options": {
+        "command": "uv run --package practix-auth --group test pytest apps/auth/tests/unit -v"
+      }
+    },
     "docker": {
       "options": {
         "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target auth --build-arg PACKAGE=practix-auth --load -t practix/auth:local ."

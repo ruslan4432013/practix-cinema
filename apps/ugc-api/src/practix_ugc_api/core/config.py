@@ -18,12 +18,12 @@ analytics-collector — там около двадцати пяти ключей
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from practix_core.settings import validate_environment
+
 # Значение по умолчанию годится только для локальной разработки и тестов.
 # Опасность таких значений в том, что они работают: сервис поднимается, ничего
 # не ломается, и подмену забывают. Поэтому в продакшене старт с ним запрещён.
 INSECURE_DEFAULT_JWT_SECRET = 'secret'
-
-KNOWN_ENVIRONMENTS = frozenset({'dev', 'test', 'prod'})
 
 
 class Settings(BaseSettings):
@@ -98,13 +98,7 @@ class Settings(BaseSettings):
     @model_validator(mode='after')
     def _validate_production_hardening(self) -> 'Settings':
         """Не даём подняться в продакшене с небезопасными настройками."""
-        normalized = self.UGC_API_ENV.strip().lower()
-        if normalized not in KNOWN_ENVIRONMENTS:
-            raise ValueError(f'UGC_API_ENV must be one of {sorted(KNOWN_ENVIRONMENTS)}, got {self.UGC_API_ENV!r}')
-        if normalized == 'prod' and self.insecure_defaults:
-            raise ValueError(
-                'Insecure default values must be overridden in production: ' + '; '.join(self.insecure_defaults)
-            )
+        validate_environment(self.UGC_API_ENV, key='UGC_API_ENV', insecure_defaults=self.insecure_defaults)
         return self
 
     @property

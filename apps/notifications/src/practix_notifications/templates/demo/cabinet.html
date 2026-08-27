@@ -1,0 +1,274 @@
+{# Демо-клиент личного кабинета: websocket с деградацией на long polling.
+
+   Вся политика перехода живёт здесь, потому что решает её КЛИЕНТ — сервер лишь
+   объявляет параметры в ответе на выдачу ticket'а. Ни адрес шлюза, ни тайминги
+   в разметке не зашиты. #}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Practix — уведомления в реальном времени</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; max-width: 820px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p.lead { margin: 0 0 20px; opacity: .75; }
+    fieldset { border: 1px solid #8884; border-radius: 8px; padding: 12px 16px; margin: 0 0 16px; }
+    legend { padding: 0 6px; font-weight: 600; }
+    textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: 12px; }
+    button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #8886; cursor: pointer; }
+    .state { display: flex; gap: 10px; align-items: center; margin: 12px 0 20px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #999; }
+    .dot.websocket { background: #2ea043; }
+    .dot.long-poll { background: #d29922; }
+    .dot.offline   { background: #cf222e; }
+    .transport { font-weight: 600; }
+    .hint { opacity: .7; font-size: 13px; }
+    ul.feed { list-style: none; padding: 0; margin: 0; }
+    ul.feed li { border: 1px solid #8883; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
+    ul.feed li .subject { font-weight: 600; }
+    ul.feed li .meta { font-size: 12px; opacity: .65; margin-top: 4px; }
+    ul.feed li.live { border-color: #2ea04380; }
+    #log { font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; opacity: .75; max-height: 220px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Уведомления в реальном времени</h1>
+  <p class="lead">
+    Демонстрация изящной деградации: websocket → long polling → лента кабинета.
+    Погасите контейнер <code>notifications-ws</code> и посмотрите на индикатор.
+  </p>
+
+  <fieldset>
+    <legend>Access-токен</legend>
+    <textarea id="token" rows="3" spellcheck="false"
+              placeholder="eyJhbGciOi… — получить: curl -s -X POST localhost/api/v1/auth/login -H 'Content-Type: application/json' -d '{&quot;login&quot;:&quot;…&quot;,&quot;password&quot;:&quot;…&quot;}'"></textarea>
+    <p><button id="connect" type="button">Подключиться</button>
+       <button id="disconnect" type="button" disabled>Отключиться</button></p>
+  </fieldset>
+
+  <div class="state">
+    <span class="dot" id="dot"></span>
+    <span class="transport" id="transport">не подключено</span>
+    <span class="hint" id="hint"></span>
+  </div>
+
+  <ul class="feed" id="feed"></ul>
+
+  <fieldset>
+    <legend>Журнал</legend>
+    <div id="log"></div>
+  </fieldset>
+
+<script>
+(() => {
+  'use strict';
+
+  // Адрес шлюза приходит с сервера: порт публикуется переменной окружения.
+  const GATEWAY = "{{ gateway_url|escapejs }}";
+  const FEED_URL = '/api/v1/notifications/me/messages';
+
+  const els = {
+    token: document.getElementById('token'),
+    connect: document.getElementById('connect'),
+    disconnect: document.getElementById('disconnect'),
+    dot: document.getElementById('dot'),
+    transport: document.getElementById('transport'),
+    hint: document.getElementById('hint'),
+    feed: document.getElementById('feed'),
+    log: document.getElementById('log'),
+  };
+
+  // Ключ дедупликации — task_id. Он есть и в кадре сокета, и в строке ленты
+  // (InboxMessage.task — OneToOne), поэтому одно и то же уведомление, пришедшее
+  // обоими путями, показывается один раз.
+  const seen = new Set();
+  let session = null;
+
+  const log = (message) => {
+    els.log.textContent = `${new Date().toLocaleTimeString()}  ${message}\n` + els.log.textContent;
+  };
+
+  const setTransport = (name, hint = '') => {
+    els.dot.className = `dot ${name}`;
+    els.transport.textContent = name;
+    els.hint.textContent = hint;
+  };
+
+  const render = (item, live) => {
+    if (!item || !item.task_id || seen.has(item.task_id)) return;
+    seen.add(item.task_id);
+    const node = document.createElement('li');
+    if (live) node.className = 'live';
+    const subject = document.createElement('div');
+    subject.className = 'subject';
+    subject.textContent = item.subject || '(без темы)';
+    const preview = document.createElement('div');
+    preview.textContent = item.preview || '';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `${live ? 'push' : 'лента'} · ${item.sent_at || ''}`;
+    node.append(subject, preview, meta);
+    els.feed.prepend(node);
+  };
+
+  /** Ступень 3: догон по ДОЛГОВЕЧНОЙ ленте.
+   *
+   *  Вызывается при каждой смене транспорта, а не по таймеру: между обрывом
+   *  сокета и первым long-poll-запросом есть окно, в котором уведомление ушло
+   *  в никуда — шлюз не хранит ничего. Только эта ступень его закрывает. */
+  const catchUp = async (state) => {
+    const url = state.since ? `${FEED_URL}?since=${encodeURIComponent(state.since)}` : FEED_URL;
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${state.token}` } });
+    if (!response.ok) throw new Error(`лента ответила ${response.status}`);
+    const body = await response.json();
+    // Лента отсортирована по убыванию — разворачиваем, чтобы свежее оказалось сверху.
+    for (const item of body.items.slice().reverse()) {
+      render(item, false);
+      if (!state.since || item.sent_at > state.since) state.since = item.sent_at;
+    }
+    log(`догон по ленте: ${body.items.length} шт.`);
+  };
+
+  const accept = (state, frame) => {
+    if (frame.type === 'notification') {
+      render(frame.data, true);
+      if (frame.data.sent_at && (!state.since || frame.data.sent_at > state.since)) state.since = frame.data.sent_at;
+    } else if (frame.type === 'desync') {
+      // Буфер соединения переполнялся: часть кадров потеряна, и об этом сказано
+      // явно — молчаливая потеря выглядела бы как «уведомлений не было».
+      log(`пропущено кадров: ${frame.dropped}, догоняю ленту`);
+      catchUp(state).catch((error) => log(`догон не удался: ${error.message}`));
+    }
+  };
+
+  const getTicket = async (state) => {
+    const response = await fetch(`${GATEWAY}/api/v1/ws/ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${state.token}` },
+    });
+    if (response.status === 401) throw new Error('токен недействителен или отозван');
+    if (!response.ok) throw new Error(`шлюз ответил ${response.status}`);
+    return response.json();
+  };
+
+  /** Ступень 1. Ticket одноразовый, поэтому берётся на КАЖДОЕ подключение. */
+  const openSocket = (state) => new Promise((resolve, reject) => {
+    getTicket(state).then((policy) => {
+      state.policy = policy;
+      const socket = new WebSocket(policy.ws_url);
+      state.socket = socket;
+      let opened = false;
+      socket.onopen = () => { opened = true; };
+      socket.onmessage = (event) => {
+        const frame = JSON.parse(event.data);
+        if (frame.type === 'hello') {
+          setTransport('websocket', 'мгновенная доставка');
+          log('websocket поднят');
+          catchUp(state).catch((error) => log(`догон не удался: ${error.message}`));
+          resolve();
+        } else if (frame.type !== 'ping' && frame.type !== 'pong') {
+          accept(state, frame);
+        }
+      };
+      socket.onclose = (event) => {
+        state.socket = null;
+        if (!opened) reject(new Error(`handshake отклонён, код ${event.code}`));
+        else if (state.running) { log(`websocket закрыт, код ${event.code}`); state.degrade(); }
+      };
+    }).catch(reject);
+  });
+
+  /** Ступень 2: long polling. Запрос висит до сообщения или таймаута, ответ —
+   *  и сразу следующий запрос. Это «второй способ» из теории. */
+  const pollLoop = async (state) => {
+    setTransport('long-poll', 'websocket недоступен, опрашиваю');
+    await catchUp(state).catch((error) => log(`догон не удался: ${error.message}`));
+    while (state.running && state.mode === 'poll') {
+      try {
+        const response = await fetch(`${GATEWAY}/api/v1/ws/poll`, {
+          headers: { Authorization: `Bearer ${state.token}` },
+        });
+        if (response.status === 401) { stop(state, 'токен отозван'); return; }
+        if (!response.ok) throw new Error(`шлюз ответил ${response.status}`);
+        const body = await response.json();
+        for (const frame of body.items) accept(state, frame);
+      } catch (error) {
+        // Шлюза нет вовсе — остаётся ЛЕНТА. Именно ради этого случая догон
+        // сделан отдельной ступенью, а не деталью long polling'а.
+        setTransport('offline', 'шлюз недоступен, читаю ленту');
+        log(`long polling не удался: ${error.message}`);
+        await catchUp(state).catch(() => {});
+        await new Promise((done) => setTimeout(done, state.policy.probe_interval * 1000));
+      }
+    }
+  };
+
+  /** Политика перехода: N попыток с экспоненциальной паузой, затем polling —
+   *  и периодические попытки вернуться обратно на websocket. */
+  const degrade = async (state) => {
+    if (state.mode === 'poll') return;
+    for (let attempt = 1; attempt <= state.policy.reconnect_attempts; attempt += 1) {
+      if (!state.running) return;
+      const delay = state.policy.reconnect_base_delay * 2 ** (attempt - 1);
+      setTransport('offline', `переподключение ${attempt}/${state.policy.reconnect_attempts} через ${delay}с`);
+      await new Promise((done) => setTimeout(done, delay * 1000));
+      try {
+        await openSocket(state);
+        state.mode = 'ws';
+        return;
+      } catch (error) {
+        log(`попытка ${attempt} не удалась: ${error.message}`);
+      }
+    }
+    state.mode = 'poll';
+    pollLoop(state);
+    // Возврат на websocket пробуем в фоне: деградация не должна быть билетом в
+    // один конец — шлюз поднимут, а клиент так и останется опрашивать.
+    const probe = setInterval(async () => {
+      if (!state.running || state.mode !== 'poll') { clearInterval(probe); return; }
+      try {
+        await openSocket(state);
+        state.mode = 'ws';
+        clearInterval(probe);
+        log('вернулись на websocket');
+      } catch { /* шлюз всё ещё лежит — молча ждём следующей пробы */ }
+    }, state.policy.probe_interval * 1000);
+  };
+
+  const stop = (state, reason) => {
+    state.running = false;
+    if (state.socket) state.socket.close();
+    setTransport('offline', reason || '');
+    els.connect.disabled = false;
+    els.disconnect.disabled = true;
+    session = null;
+  };
+
+  els.connect.addEventListener('click', async () => {
+    const token = els.token.value.trim();
+    if (!token) { setTransport('offline', 'вставьте токен'); return; }
+    els.connect.disabled = true;
+    els.disconnect.disabled = false;
+    const state = {
+      token, running: true, mode: 'ws', since: null, socket: null,
+      // Значения до первого ответа шлюза: если он лежит с самого начала,
+      // деградировать всё равно надо по каким-то правилам.
+      policy: { reconnect_attempts: 3, reconnect_base_delay: 1, probe_interval: 60 },
+    };
+    state.degrade = () => degrade(state);
+    session = state;
+    try {
+      await openSocket(state);
+    } catch (error) {
+      log(`websocket не поднялся: ${error.message}`);
+      degrade(state);
+    }
+  });
+
+  els.disconnect.addEventListener('click', () => { if (session) stop(session, 'отключено'); });
+})();
+</script>
+</body>
+</html>

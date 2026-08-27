@@ -1,0 +1,25 @@
+{# Подтверждение состоявшейся отписки. #}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Practix — вы отписаны</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 15px/1.6 system-ui, sans-serif; margin: 0; padding: 48px 24px; max-width: 560px; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    p { margin: 0 0 20px; }
+    code { font-family: ui-monospace, monospace; }
+    .hint { opacity: .7; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Вы отписаны</h1>
+  <p>
+    {% if email %}Адрес <code>{{ email }}</code> больше не будет получать письма этой рассылки.
+    {% else %}Письма этой рассылки больше не придут.{% endif %}
+  </p>
+  <p class="hint">Изменить настройки уведомлений можно в личном кабинете.</p>
+</body>
+</html>

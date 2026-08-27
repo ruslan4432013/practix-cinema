@@ -1,0 +1,40 @@
+[project]
+name = "practix-link-shortener"
+version = "1.0.0"
+description = "Сокращённые ссылки и подтверждение email по ним"
+requires-python = ">=3.13"
+dependencies = [
+    # Без экстры `jwt`: сервис НЕ проверяет пользовательские токены. Переход по
+    # /s/{code} анонимен по определению — получатель письма не залогинен.
+    # Экстра `httpx` у practix-core — это только инструментация OpenTelemetry;
+    # сам клиент объявляется здесь, потому что им ходит auth_client.
+    "practix-core[asgi,fastapi,otel,httpx,sentry]",
+    "httpx>=0.28.1",
+    "fastapi>=0.137.1",
+    "uvicorn>=0.49.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "sqlalchemy[asyncio]>=2.0.51",
+    "asyncpg>=0.31.0",
+    "alembic>=1.18.5",
+    # Страницы 404/503 отдаются пользователю, а не сервису: HTML, а не JSON.
+    "jinja2>=3.1.4",
+    "typer>=0.27.0",
+]
+
+[dependency-groups]
+test = [
+    "practix-testing",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+]
+
+[project.scripts]
+practix-link-shortener = "practix_link_shortener.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/practix_link_shortener"]

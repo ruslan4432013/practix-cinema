@@ -51,7 +51,12 @@ x-clickhouse-keeper: &clickhouse-keeper
 #   docker compose --profile warehouse up -d         # 30: + ClickHouse, Keeper, ETL ClickHouse
 #   docker compose --profile observability up -d     # 27: + Prometheus, Grafana, Kafka UI, GlitchTip
 #   docker compose --profile logging up -d           # 26: + Elasticsearch(логи), Logstash, Kibana, Filebeat
-#   docker compose --profile warehouse --profile observability --profile logging up -d   # всё (41)
+#   docker compose --profile notifications up -d     # 28: + панель рассылок, воркер, планировщик, RabbitMQ, Mailpit, своя БД
+#   docker compose --profile warehouse --profile observability --profile logging --profile notifications up -d   # всё (48)
+#
+# ЛЮБОЙ профиль обязан повторяться и на `down`/`down -v`. Иначе его контейнеры и
+# тома переживают teardown, и следующий «чистый» стенд оказывается не чистым —
+# ровно так однажды упал функциональный набор.
 #
 # В профиль вынесено самое тяжёлое: 4 узла ClickHouse + 3 Keeper — это и есть
 # основная часть тех ≥12 ГБ, а ELK добавляет к ним ещё около 2 ГБ.
@@ -909,6 +914,11 @@ services:
       # старте и падает с `host not found in upstream`, если контейнера нет.
       ugc-api:
         condition: service_healthy
+      # По той же причине без required: false. Короткая ссылка живёт в письме и
+      # обязана открываться как http://localhost/s/AbC1234 — это и есть повод
+      # держать сервис в ядре, а не в профиле.
+      link-shortener:
+        condition: service_healthy
     ports:
       - "${NGINX_HOST_PORT:-80}:80"
     networks:
@@ -1108,6 +1118,382 @@ services:
     networks:
       - movies_net
 
+  # ================= Сокращение ссылок ====================================
+  #
+  # БЕЗ ПРОФИЛЯ, в ядре — и это не оплошность. Короткая ссылка обязана
+  # открываться как http://localhost/s/AbC1234, значит её маршрутизирует nginx,
+  # а nginx резолвит upstream'ы на старте и умирает с «host not found in
+  # upstream», если контейнера нет. Ровно поэтому в ядре живут и `ugc-api`, и
+  # коллектор.
+  #
+  # Вариант «профиль + свой хост-порт», как у панели рассылок и websocket-шлюза,
+  # здесь НЕ подходит: ссылка стала бы http://localhost:8092/s/AbC1234 — длиннее
+  # того адреса, который она сокращает. Это отрицание задачи, а не компромисс.
+  shortener-db:
+    image: postgres:16
+    container_name: shortener-db
+    environment:
+      POSTGRES_USER: ${SHORTENER_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${SHORTENER_POSTGRES_PASSWORD:-secret}
+      POSTGRES_DB: ${SHORTENER_POSTGRES_DB:-shortener_database}
+    # 5432 — theatre-db, 5433 — auth-db, 5434 — стенд исследования,
+    # 5435 — ugc-db, 5436 — notifications-db.
+    ports:
+      - "${SHORTENER_DB_HOST_PORT:-5437}:5432"
+    volumes:
+      - shortener_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SHORTENER_POSTGRES_USER:-postgres} -d ${SHORTENER_POSTGRES_DB:-shortener_database}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - movies_net
+
+  # Образ тот же, что у `link-shortener`: миграции и приложение обязаны
+  # запускаться из одного набора байт. `build` объявлен у сервиса, которому
+  # образ принадлежит.
+  shortener-migrations:
+    image: practix/link-shortener:local
+    container_name: shortener-migrations
+    env_file:
+      - ../../.env
+    environment:
+      SHORTENER_POSTGRES_HOST: shortener-db
+      SHORTENER_POSTGRES_PORT: 5432
+    depends_on:
+      shortener-db:
+        condition: service_healthy
+    # -c с явным путём, а не смена working_dir: рабочий каталог образа менять
+    # нельзя — entrypoint создаёт там .env из .env.example.
+    command: >
+      sh -c "alembic -c apps/link-shortener/alembic.ini upgrade head"
+    networks:
+      - movies_net
+
+  link-shortener:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: link-shortener
+      args:
+        PACKAGE: practix-link-shortener
+    image: practix/link-shortener:local
+    container_name: link-shortener
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: link-shortener
+      SHORTENER_POSTGRES_HOST: shortener-db
+      SHORTENER_POSTGRES_PORT: 5432
+      SHORTENER_AUTH_API_URL: http://auth:8000
+    expose:
+      - "8000"
+    depends_on:
+      shortener-db:
+        condition: service_healthy
+      shortener-migrations:
+        condition: service_completed_successfully
+      # Auth нужен ссылкам подтверждения: их резолв заканчивается вызовом
+      # POST /api/v1/users/{id}/confirm-email.
+      auth:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - movies_net
+
+  # ================= Нотификации (профиль notifications) ==================
+  #
+  # Семь контейнеров, из них четыре — ОДИН образ practix/notifications:local с
+  # разными командами. Так же, как auth и auth-migrations делят practix/auth:local.
+  #
+  # ДВЕ ЛОВУШКИ, обе уже обжигали в этом репозитории:
+  #
+  # 1. `--profile notifications` НАДО ПОВТОРЯТЬ И НА `down`. Иначе пять
+  #    контейнеров переживают teardown, а `down -v` оставляет тома — ровно так
+  #    потом падает функциональный набор на «чистом» стенде (см. профиль logging).
+  # 2. НЕ ДОБАВЛЯТЬ панель в infra/nginx: nginx резолвит upstream'ы на старте и
+  #    умирает с «host not found in upstream», если профильного контейнера нет.
+  #    Плюс `location /admin` уже принадлежит контентной админке. Панель
+  #    публикуется прямым хост-портом.
+
+  notifications-db:
+    profiles: ["notifications"]
+    image: postgres:16
+    container_name: notifications-db
+    environment:
+      # Значения по умолчанию, в отличие от соседних баз: ключи NOTIFY_* новые, и
+      # у всех, кто скопировал .env раньше, их в файле нет — без дефолтов база
+      # поднялась бы с пустым именем пользователя.
+      POSTGRES_USER: ${NOTIFY_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${NOTIFY_POSTGRES_PASSWORD:-secret}
+      POSTGRES_DB: ${NOTIFY_POSTGRES_DB:-notifications_database}
+    ports:
+      - "${NOTIFICATIONS_DB_HOST_PORT:-5436}:5432"
+    volumes:
+      - notifications_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NOTIFY_POSTGRES_USER:-postgres} -d ${NOTIFY_POSTGRES_DB:-notifications_database}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - movies_net
+
+  rabbitmq:
+    profiles: ["notifications"]
+    image: rabbitmq:3.13-management
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "${RABBITMQ_HOST_PORT:-5672}:5672"
+      # Management UI и его HTTP API. API нужен не только человеку: по нему
+      # функциональные тесты проверяют топологию и глубину очередей.
+      - "${RABBITMQ_UI_HOST_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks:
+      - movies_net
+
+  mailpit:
+    profiles: ["notifications"]
+    image: axllent/mailpit:v1.21
+    container_name: mailpit
+    environment:
+      MP_MAX_MESSAGES: "5000"
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "${MAILPIT_UI_HOST_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - movies_net
+
+  notifications-migrations:
+    profiles: ["notifications"]
+    # Без build: образ принадлежит notifications-admin, здесь только другая
+    # команда поверх того же тега.
+    image: practix/notifications:local
+    container_name: notifications-migrations
+    env_file:
+      - ../../.env
+    depends_on:
+      notifications-db:
+        condition: service_healthy
+    # collectstatic здесь НЕ вызывается: этот контейнер отработает и исчезнет
+    # вместе со своей файловой системой, а общего тома со статикой нет. Статику
+    # собирает сам сервис панели при старте — см. стадию notifications в
+    # infra/docker/python-service.Dockerfile.
+    command: >
+      sh -c "python -m practix_notifications.manage migrate --no-input
+      && python -m practix_notifications.manage seed_demo"
+    networks:
+      - movies_net
+
+  notifications-admin:
+    profiles: ["notifications"]
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: notifications
+      args:
+        PACKAGE: practix-notifications
+    image: practix/notifications:local
+    container_name: notifications-admin
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: notifications
+      NOTIFY_POSTGRES_HOST: notifications-db
+      NOTIFY_POSTGRES_PORT: 5432
+      # Денилист отозванных токенов ведёт Auth, и личный кабинет читает его там
+      # же, где он пишется, — в Redis ЯДРА, а не профиля.
+      AUTH_REDIS_HOST: redis
+      AUTH_REDIS_PORT: 6379
+    ports:
+      - "${NOTIFICATIONS_HOST_PORT:-8090}:8000"
+    depends_on:
+      notifications-db:
+        condition: service_healthy
+      notifications-migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      # Redis лежит в ядре, а не в профиле, поэтому зависимость между профилями
+      # безопасна: ядро поднимается всегда. Отправляющему воркеру он тоже нужен,
+      # но за другим — за общим слотом темпа отправки (см. ниже).
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 25s
+    networks:
+      - movies_net
+
+  # Формирующий воркер. Из очереди приходят одни идентификаторы: имя, фамилию и
+  # адрес он забирает у Auth сам и здесь же собирает письмо. Отсюда единственная
+  # зависимость, которой нет у отправляющего, — сам Auth.
+  #
+  # Разделение не косметическое: коннект к SMTP стоит около пяти секунд и
+  # держится открытым, поэтому отправляющий воркер не должен простаивать в нём,
+  # ожидая HTTP-ответ. Плюс при отказе Auth можно погасить ТОЛЬКО эти реплики, и
+  # уже собранные письма продолжат уходить.
+  notifications-builder:
+    profiles: ["notifications"]
+    image: practix/notifications:local
+    container_name: notifications-builder
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: notifications-builder
+      NOTIFY_POSTGRES_HOST: notifications-db
+      NOTIFY_POSTGRES_PORT: 5432
+    depends_on:
+      notifications-db:
+        condition: service_healthy
+      notifications-migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      # Auth живёт в ядре, поэтому зависимость из профиля безопасна — как и с
+      # Redis у панели. Без Auth собирать письма не из чего.
+      auth:
+        condition: service_healthy
+    command: ["python", "-m", "practix_notifications.manage", "run_builder"]
+    networks:
+      - movies_net
+
+  notifications-worker:
+    profiles: ["notifications"]
+    image: practix/notifications:local
+    container_name: notifications-worker
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: notifications-worker
+      NOTIFY_POSTGRES_HOST: notifications-db
+      NOTIFY_POSTGRES_PORT: 5432
+      # Темп отправки — общий на сервис, и его слот лежит в Redis ЯДРА (там же,
+      # где денилист Auth). Без общего слота ограничение считалось бы на процесс,
+      # то есть отменялось бы каждой новой репликой этого же контейнера.
+      AUTH_REDIS_HOST: redis
+      AUTH_REDIS_PORT: 6379
+    # Healthcheck нет: процесс не слушает порт. Масштабируется репликами —
+    # очередь одна, консьюмеров можно сколько угодно.
+    depends_on:
+      notifications-db:
+        condition: service_healthy
+      notifications-migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+      # Кросс-профильная зависимость на ядро — как у панели и шлюза, и по той же
+      # причине безопасная: ядро поднимается всегда.
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "practix_notifications.manage", "run_worker"]
+    networks:
+      - movies_net
+
+  notifications-scheduler:
+    profiles: ["notifications"]
+    image: practix/notifications:local
+    container_name: notifications-scheduler
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: notifications-scheduler
+      NOTIFY_POSTGRES_HOST: notifications-db
+      NOTIFY_POSTGRES_PORT: 5432
+    depends_on:
+      notifications-db:
+        condition: service_healthy
+      notifications-migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    command: ["python", "-m", "practix_notifications.manage", "run_scheduler"]
+    networks:
+      - movies_net
+
+  # Websocket-шлюз мгновенных уведомлений. Отдельный сервис и отдельный образ,
+  # потому что теория запрещает websocket на синхронном сервере: панель — это
+  # gunicorn с двумя воркерами, и сотня открытых вкладок заняла бы их все.
+  #
+  # Nginx перед ним нет по трём причинам сразу: он резолвит upstream'ы на старте
+  # и падает без профильного контейнера; глобальный `proxy_set_header Connection ""`
+  # ломает handshake; `proxy_read_timeout 5s` рвал бы соединение каждые пять
+  # секунд. Поэтому — прямой хост-порт, как у панели.
+  #
+  # Ядро на него НЕ смотрит и смотреть не должно: уведомления в реальном времени
+  # не могут быть условием работы сайта.
+  notifications-ws:
+    profiles: ["notifications"]
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: notifications-ws
+      args:
+        PACKAGE: practix-notifications-ws
+    image: practix/notifications-ws:local
+    container_name: notifications-ws
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: notifications-ws
+      # NOTIFY_AMQP_URL приходит из корневого .env — тот же брокер, что у
+      # воркеров: шлюз подписывается на fanout-обменник notifications.ws, в
+      # который публикует WebsocketSender. Своей переменной под адрес брокера у
+      # шлюза нет намеренно: второй источник правды разъехался бы с первым.
+      #
+      # Redis ЯДРА: там же денилист, который ведёт Auth, и там же живут
+      # одноразовые ticket'ы — их волатильность режиму volatile-lru подходит.
+      AUTH_REDIS_HOST: redis
+      AUTH_REDIS_PORT: 6379
+    ports:
+      - "${NOTIFICATIONS_WS_HOST_PORT:-8091}:8000"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - movies_net
+
 networks:
   movies_net:
     driver: bridge
@@ -1121,6 +1507,9 @@ volumes:
   static_volume:
   auth_pg_data:
   ugc_pg_data:
+  shortener_pg_data:
+  notifications_pg_data:
+  rabbitmq_data:
   kafka_0_data:
   kafka_1_data:
   kafka_2_data:

@@ -11,6 +11,22 @@
   ],
   "targets": {
     "lint": {},
+    "test": {
+      "inputs": [
+        "python",
+        "{projectRoot}/pytest.ini",
+        "{projectRoot}/uv.lock",
+        "{workspaceRoot}/pyproject.toml"
+      ],
+      "options": {
+        "cwd": "apps/django-admin",
+        "command": "uv run --group test pytest",
+        "env": {
+          "UV_PYTHON": "3.12",
+          "VIRTUAL_ENV": ""
+        }
+      }
+    },
     "docker": {
       "options": {
         "command": "docker buildx build -f apps/django-admin/Dockerfile --load -t practix/django-admin:local apps/django-admin"

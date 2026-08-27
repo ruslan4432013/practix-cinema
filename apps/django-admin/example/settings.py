@@ -153,6 +153,13 @@ AUTH_API_URL = env.AUTH_API_URL
 AUTH_API_TIMEOUT = env.AUTH_API_TIMEOUT
 AUTH_API_MAX_ATTEMPTS = env.AUTH_API_MAX_ATTEMPTS
 
+# Настройки отчётного события «появился новый фильм» (movies/signals.py).
+NOTIFY_EVENTS_ENABLED = env.NOTIFY_EVENTS_ENABLED
+NOTIFY_API_URL = env.NOTIFY_API_URL
+NOTIFY_INTAKE_TOKEN = env.NOTIFY_INTAKE_TOKEN
+NOTIFY_EVENT_TIMEOUT = env.NOTIFY_EVENT_TIMEOUT
+NOTIFY_EVENT_MAX_ATTEMPTS = env.NOTIFY_EVENT_MAX_ATTEMPTS
+
 
 # --- Логирование ------------------------------------------------------------
 # Раньше LOGGING в проекте не было ВООБЩЕ: действовал дефолт Django, который при

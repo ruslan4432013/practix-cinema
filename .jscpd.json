@@ -10,6 +10,7 @@
     "apps/*/migrations/versions/**",
     "apps/*/migrations/env.py",
     "apps/django-admin/*/migrations/**",
+    "apps/notifications/src/practix_notifications/*/migrations/**",
     "sqlite_to_postgres/**",
     "schema_design/**"
   ],
@@ -22,5 +23,5 @@
   "output": ".jscpd",
   "absolute": false,
   "gitignore": false,
-  "threshold": 1.0
+  "threshold": 0.8
 }

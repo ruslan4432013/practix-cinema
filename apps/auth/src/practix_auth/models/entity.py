@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    false,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -36,6 +38,16 @@ class User(Base):
     # Пароль может отсутствовать у пользователей, вошедших только через соцсети (OAuth).
     password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # Имя и фамилия — то, чем сервис нотификаций персонифицирует письмо. Nullable,
+    # а не server_default='': пустая строка неотличима от «пользователь очистил
+    # поле», а NULL честно говорит «мы никогда не спрашивали».
+    first_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Подтверждён ли адрес. Ставится не здесь: welcome-письмо несёт короткую
+    # ссылку, шортенер её резолвит и зовёт POST /users/{id}/confirm-email.
+    # NOT NULL с дефолтом, а не nullable: «неизвестно» — не состояние адреса.
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false(), default=False)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     roles: Mapped[list['Role']] = relationship(secondary=user_roles, back_populates='users', lazy='selectin')
