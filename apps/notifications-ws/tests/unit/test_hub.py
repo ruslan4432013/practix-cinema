@@ -47,11 +47,12 @@ def test_total_connection_limit(hub: ConnectionHub):
         hub.subscribe('user-c')
 
 
-def test_long_poll_ignores_the_limits(hub: ConnectionHub):
+def test_long_poll_ignores_the_socket_limits(hub: ConnectionHub):
     """Клиент, дошедший до long polling'а, УЖЕ деградировал.
 
-    Отказать ему по лимиту вкладок значило бы отправить его на ленту с минутными
-    паузами ровно в тот момент, когда он и так остался без сокета.
+    Отказать ему по лимиту ВКЛАДОК значило бы отправить его на ленту с минутными
+    паузами ровно в тот момент, когда он и так остался без сокета. Свой потолок у
+    поллеров при этом есть — он проверяется в ``TestPollerBudget``.
     """
     hub.subscribe('user-a')
     hub.subscribe('user-a')
@@ -122,11 +123,11 @@ class TestConnectionBudget:
     """
 
     def test_pollers_do_not_consume_the_socket_budget(self, hub: ConnectionHub):
-        for index in range(10):
+        for index in range(5):  # весь бюджет поллеров фикстуры
             hub.subscribe(f'poller-{index}', count_towards_limits=False)
 
         assert hub.total == 0
-        assert hub.pollers == 10
+        assert hub.pollers == 5
         # Бюджет цел: сокет по-прежнему принимается.
         assert hub.subscribe('user-a') is not None
 
@@ -163,3 +164,55 @@ class TestConnectionBudget:
 
         assert hub.publish('user-a', FRAME) == 1
         assert poller.queue.get_nowait() == FRAME
+
+
+class TestPollerBudget:
+    """У поллеров СВОЙ потолок, и он не безграничен.
+
+    Раньше ``count_towards_limits=False`` отключал проверки целиком: ни
+    ``max_total``, ни ``max_per_user``, ни своего лимита. Один аутентифицированный
+    пользователь мог держать тысячи параллельных ``/poll``, каждый со своей
+    задачей и очередью кадров, — деградация превращалась в вектор DoS.
+    """
+
+    def test_per_user_poller_limit(self, hub: ConnectionHub):
+        for _ in range(3):  # max_pollers_per_user фикстуры
+            hub.subscribe('user-a', count_towards_limits=False)
+
+        with pytest.raises(ConnectionLimitReached):
+            hub.subscribe('user-a', count_towards_limits=False)
+
+    def test_total_poller_limit(self, hub: ConnectionHub):
+        """Потолок на процесс: одним пользователем per-user лимита не обойти."""
+        for _ in range(3):
+            hub.subscribe('user-a', count_towards_limits=False)
+        for _ in range(2):
+            hub.subscribe('user-b', count_towards_limits=False)
+
+        assert hub.pollers == 5
+        with pytest.raises(ConnectionLimitReached):
+            hub.subscribe('user-c', count_towards_limits=False)
+
+    def test_unsubscribe_frees_a_poller_slot(self, hub: ConnectionHub):
+        pollers = [hub.subscribe('user-a', count_towards_limits=False) for _ in range(3)]
+        hub.unsubscribe(pollers[0])
+
+        hub.subscribe('user-a', count_towards_limits=False)  # не должно бросить
+        assert (hub.total, hub.pollers) == (0, 3)
+
+    def test_a_full_poller_budget_does_not_block_a_socket(self, hub: ConnectionHub):
+        """Обратная сторона того же инварианта: два бюджета не пересекаются НИ В
+        ОДНУ сторону. Иначе висящий ``/poll`` мешал бы тому же человеку вернуться
+        на websocket — то есть наказывал бы за успешную деградацию."""
+        for _ in range(3):
+            hub.subscribe('user-a', count_towards_limits=False)
+
+        assert hub.count_for('user-a') == 0
+        assert hub.subscribe('user-a') is not None
+
+    def test_a_full_socket_budget_does_not_block_a_poller(self, hub: ConnectionHub):
+        hub.subscribe('user-a')
+        hub.subscribe('user-a')
+
+        assert hub.pollers_for('user-a') == 0
+        assert hub.subscribe('user-a', count_towards_limits=False) is not None

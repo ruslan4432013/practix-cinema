@@ -31,8 +31,8 @@ dependencies = [
     "opentelemetry-instrumentation-django>=0.64b0",
     "opentelemetry-instrumentation-requests>=0.64b0",
     # Денилист отозванных токенов ведёт Auth, и читается он в ЕГО экземпляре
-    # Redis. Своих данных в Redis у сервиса нет — это единственный клиент, и он
-    # чужой (см. core/redis.py).
+    # Redis; там же лежит волатильный ключ общего темпа отправки. Клиент в
+    # сервисе один, а экземпляр за ним общий (см. core/redis.py).
     "redis>=8.0.0",
     # ТОЛЬКО pyjwt. Экстра practix-core[jwt] притащила бы async-fastapi-jwt-auth,
     # а с ней fastapi и starlette в WSGI-образ — ради одной функции jwt.decode.

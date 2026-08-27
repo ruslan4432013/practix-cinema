@@ -75,29 +75,46 @@ class Subscription:
 class ConnectionHub:
     """Кто из подключённых к ЭТОМУ процессу ждёт уведомлений."""
 
-    def __init__(self, *, queue_size: int, max_per_user: int, max_total: int) -> None:
+    def __init__(
+        self,
+        *,
+        queue_size: int,
+        max_per_user: int,
+        max_total: int,
+        max_pollers_per_user: int,
+        max_pollers: int,
+    ) -> None:
         self._queue_size = queue_size
         self._max_per_user = max_per_user
         self._max_total = max_total
+        self._max_pollers_per_user = max_pollers_per_user
+        self._max_pollers = max_pollers
         self._subscribers: dict[str, set[Subscription]] = defaultdict(set)
         self._total = 0
         self._pollers = 0
 
     @property
     def total(self) -> int:
-        """Открытые сокеты. Именно они расходуют бюджет соединений."""
+        """Открытые сокеты. Они расходуют бюджет соединений — и только его."""
         return self._total
 
     @property
     def pollers(self) -> int:
-        """Ждущие long-poll-запросы. Бюджет не расходуют, но видеть их полезно."""
+        """Ждущие long-poll-запросы. У них свой бюджет, не пересекающийся с сокетами."""
         return self._pollers
 
     def users(self) -> int:
         return len(self._subscribers)
 
     def count_for(self, user_id: str) -> int:
-        return len(self._subscribers.get(user_id, ()))
+        """Сокеты пользователя. Поллеры сюда НЕ входят: иначе висящий ``/poll``
+        мешал бы тому же человеку открыть настоящее соединение — ровно то, чего
+        раздельные бюджеты и должны не допускать."""
+        return sum(1 for subscription in self._subscribers.get(user_id, ()) if subscription.counted)
+
+    def pollers_for(self, user_id: str) -> int:
+        """Ждущие long-poll-запросы пользователя."""
+        return sum(1 for subscription in self._subscribers.get(user_id, ()) if not subscription.counted)
 
     def subscribe(self, user_id: str, *, count_towards_limits: bool = True) -> Subscription:
         """Зарегистрировать канал доставки.
@@ -107,17 +124,26 @@ class ConnectionHub:
             отказывать клиенту, который как раз ДЕГРАДИРОВАЛ и пытается получить
             хоть что-то.
 
-            Поэтому он не только не проверяется на лимиты, но и НЕ УВЕЛИЧИВАЕТ
-            ``total``. Увеличивал бы — и достаточное число одновременных
-            ``/poll`` упёрло бы счётчик в ``max_total``, после чего шлюз
-            перестал бы пускать настоящие сокеты: деградировавший клиент выбивал
-            бы недеградировавших. Считаются поллеры отдельно, для наблюдаемости.
+            Поэтому у поллеров СВОЙ счётчик и СВОИ потолки. Инвариант — два
+            бюджета не пересекаются ни в одну сторону: поллер не занимает слот
+            сокета (иначе достаточное число одновременных ``/poll`` упёрло бы
+            счётчик в ``max_total``, и деградировавший клиент выбивал бы
+            недеградировавших), а сокет не занимает слот поллера.
+
+            Безлимитными поллеры при этом быть не могут: каждый держит задачу и
+            очередь на ``queue_size`` кадров до полуминуты, так что один
+            аутентифицированный клиент без потолка исчерпал бы память процесса.
         """
         if count_towards_limits:
             if self._total >= self._max_total:
                 raise ConnectionLimitReached(f'gateway connection limit reached ({self._max_total})')
             if self.count_for(user_id) >= self._max_per_user:
                 raise ConnectionLimitReached(f'connection limit reached for user ({self._max_per_user})')
+        else:
+            if self._pollers >= self._max_pollers:
+                raise ConnectionLimitReached(f'gateway long-poll limit reached ({self._max_pollers})')
+            if self.pollers_for(user_id) >= self._max_pollers_per_user:
+                raise ConnectionLimitReached(f'long-poll limit reached for user ({self._max_pollers_per_user})')
 
         subscription = Subscription(user_id, maxsize=self._queue_size, counted=count_towards_limits)
         self._subscribers[user_id].add(subscription)

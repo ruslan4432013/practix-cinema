@@ -9,6 +9,7 @@
 import asyncio
 
 import pytest
+from fastapi import HTTPException
 
 from practix_notifications_ws.api.v1 import stream
 from practix_notifications_ws.core.config import settings
@@ -76,6 +77,9 @@ async def test_subscription_is_always_released(hub):
     await stream.poll(wait=1, authorize=FakeAuthorize())
 
     assert hub.total == 0
+    # Не только сокетный счётчик: теперь у поллеров свой потолок, и утёкшая
+    # подписка выедала бы именно его — до отказа всем опросам пользователя.
+    assert hub.pollers == 0
 
 
 async def test_wait_is_clamped_to_the_ceiling(hub, monkeypatch):
@@ -89,12 +93,41 @@ async def test_wait_is_clamped_to_the_ceiling(hub, monkeypatch):
 
 
 async def test_token_without_subject_is_rejected(hub):
-    from fastapi import HTTPException
-
     with pytest.raises(HTTPException) as exc:
         await stream.poll(wait=1, authorize=FakeAuthorize(subject=None))
 
     assert exc.value.status_code == 401
+
+
+async def test_exhausted_poller_budget_is_a_429(hub):
+    """Отказ, а не безлимит: каждый висящий запрос держит задачу и очередь
+    кадров, и без потолка один пользователь исчерпал бы память процесса.
+
+    ``Retry-After`` обязателен — иначе клиент вернётся мгновенно и будет
+    молотить отказами; ступенью ниже у него в любом случае остаётся лента."""
+    for _ in range(3):  # max_pollers_per_user фикстуры
+        hub.subscribe('user-1', count_towards_limits=False)
+
+    with pytest.raises(HTTPException) as exc:
+        await stream.poll(wait=1, authorize=FakeAuthorize())
+
+    assert exc.value.status_code == 429
+    assert exc.value.headers['Retry-After'] == str(int(settings.NOTIFY_WS_POLL_TIMEOUT))
+    # Отказ не оставил после себя подписку.
+    assert hub.pollers == 3
+
+
+async def test_a_rejected_poller_does_not_touch_the_socket_budget(hub):
+    """Бюджеты раздельные: отказ деградировавшему клиенту не должен ни отнимать,
+    ни занимать слот сокета."""
+    for _ in range(3):
+        hub.subscribe('user-1', count_towards_limits=False)
+
+    with pytest.raises(HTTPException):
+        await stream.poll(wait=1, authorize=FakeAuthorize())
+
+    assert hub.total == 0
+    assert hub.subscribe('user-1') is not None
 
 
 async def test_dropped_frames_are_reported_first(hub):

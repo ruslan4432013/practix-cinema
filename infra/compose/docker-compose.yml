@@ -1339,8 +1339,8 @@ services:
       rabbitmq:
         condition: service_healthy
       # Redis лежит в ядре, а не в профиле, поэтому зависимость между профилями
-      # безопасна: ядро поднимается всегда. Воркеру он не нужен — лента пишется
-      # только в Postgres.
+      # безопасна: ядро поднимается всегда. Отправляющему воркеру он тоже нужен,
+      # но за другим — за общим слотом темпа отправки (см. ниже).
       redis:
         condition: service_healthy
       jaeger:
@@ -1397,6 +1397,11 @@ services:
       OTEL_SERVICE_NAME: notifications-worker
       NOTIFY_POSTGRES_HOST: notifications-db
       NOTIFY_POSTGRES_PORT: 5432
+      # Темп отправки — общий на сервис, и его слот лежит в Redis ЯДРА (там же,
+      # где денилист Auth). Без общего слота ограничение считалось бы на процесс,
+      # то есть отменялось бы каждой новой репликой этого же контейнера.
+      AUTH_REDIS_HOST: redis
+      AUTH_REDIS_PORT: 6379
     # Healthcheck нет: процесс не слушает порт. Масштабируется репликами —
     # очередь одна, консьюмеров можно сколько угодно.
     depends_on:
@@ -1407,6 +1412,10 @@ services:
       rabbitmq:
         condition: service_healthy
       mailpit:
+        condition: service_healthy
+      # Кросс-профильная зависимость на ядро — как у панели и шлюза, и по той же
+      # причине безопасная: ядро поднимается всегда.
+      redis:
         condition: service_healthy
     command: ["python", "-m", "practix_notifications.manage", "run_worker"]
     networks:

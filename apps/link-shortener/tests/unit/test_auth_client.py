@@ -52,10 +52,46 @@ class FakeHttp:
         return item
 
 
+class RoutingHttp:
+    """Транспорт, отвечающий по URL, а не по очереди.
+
+    Сценарный ``FakeHttp`` для гонки не годится: при параллельных переходах
+    порядок вызовов не определён, и очередь начала бы отдавать ответ входа на
+    подтверждение. Здесь же ``await asyncio.sleep(0)`` внутри ``post`` — точка
+    переключения, без которой корутины отработали бы по одной и гонки бы просто
+    не случилось.
+    """
+
+    def __init__(self, *, token: str = 'fresh', expired: str | None = None) -> None:
+        self._token = token
+        self._expired = expired
+        self.logins = 0
+        self.confirms = 0
+
+    async def post(self, url: str, **kwargs):
+        await asyncio.sleep(0)
+        if 'auth/login' in url:
+            self.logins += 1
+            return FakeResponse(200, {'access_token': self._token})
+
+        self.confirms += 1
+        authorization = (kwargs.get('headers') or {}).get('Authorization')
+        if self._expired is not None and authorization == f'Bearer {self._expired}':
+            return FakeResponse(401)
+        return FakeResponse(200, {'status': 'confirmed'})
+
+
 def _client(script: list) -> AuthClient:
     client = AuthClient(base_url='http://auth:8000')
     client._client = FakeHttp(script)
     return client
+
+
+def _gather_confirms(client: AuthClient, count: int) -> list[str]:
+    async def run():
+        return await asyncio.gather(*(client.confirm_email(uuid.uuid4()) for _ in range(count)))
+
+    return asyncio.run(run())
 
 
 def _confirm(client: AuthClient):
@@ -123,3 +159,33 @@ def test_happy_path_talks_to_login_once_and_reuses_the_token():
     assert _confirm(client) == 'confirmed'
     assert _confirm(client) == 'already_confirmed'
     assert sum('auth/login' in url for url in client._client.calls) == 1
+
+
+def test_concurrent_cold_start_logs_in_once():
+    """Холодный клиент под пачкой переходов входит один раз, а не пять.
+
+    Клиент — синглтон на процесс, и до замка каждая корутина видела
+    ``self._token`` пустым и уходила логиниться сама.
+    """
+    client = AuthClient(base_url='http://auth:8000')
+    client._client = RoutingHttp()
+
+    assert _gather_confirms(client, 5) == ['confirmed'] * 5
+    assert client._client.logins == 1
+    assert client._client.confirms == 5
+
+
+def test_expiry_under_load_relogins_once():
+    """Протухание под нагрузкой стоит одного повторного входа, а не пяти.
+
+    Это тест на ``stale``: одного замка мало — опоздавшая корутина с 401 на
+    старом токене обнулением затёрла бы уже полученный свежий и запустила бы
+    второй круг входов.
+    """
+    client = AuthClient(base_url='http://auth:8000')
+    client._client = RoutingHttp(token='fresh', expired='old')
+    client._token = 'old'
+
+    assert _gather_confirms(client, 5) == ['confirmed'] * 5
+    assert client._client.logins == 1
+    assert client._token == 'fresh'

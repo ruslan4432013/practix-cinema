@@ -15,12 +15,17 @@
 падает почтовый сервер и сервис падает вслед за ним» — прямая цитата из теории.
 ``NOTIFY_SMTP_RATE_PER_SECOND`` держит темп; при превышении отправитель просто
 ждёт.
+
+Считается этот темп НА СЕРВИС, а не на процесс, и хранится он поэтому не здесь —
+см. :mod:`practix_notifications.channels.pacing`. Раньше пауза отсчитывалась от
+поля экземпляра, и при нескольких репликах отправляющего воркера суммарный поток
+в почтовый сервер становился кратен их числу: ручка отменялась ровно тем
+действием, ради которого её и заводили.
 """
 
 import logging
 import re
 import smtplib
-import time
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 
@@ -30,6 +35,7 @@ from practix_notifications.channels.base import (
     Sender,
     TemporaryDeliveryError,
 )
+from practix_notifications.channels.pacing import RatePacer
 from practix_notifications.core.config import settings
 from practix_notifications.enums import Channel
 
@@ -39,9 +45,11 @@ logger = logging.getLogger('notifications.email')
 class SmtpSender(Sender):
     channel = Channel.EMAIL.value
 
-    def __init__(self) -> None:
+    def __init__(self, pacer: RatePacer | None = None) -> None:
         self._smtp: smtplib.SMTP | None = None
-        self._last_sent_at = 0.0
+        # Адрес сервера — часть ключа: лимит защищает КОНКРЕТНЫЙ почтовый сервер,
+        # и после смены адреса наследовать чужой слот незачем.
+        self._pacer = pacer or RatePacer(key=f'notifications:pace:email:{settings.NOTIFY_SMTP_HOST}')
         #: Счётчик подключений — его читает юнит-тест переиспользования.
         self.connects = 0
 
@@ -77,7 +85,9 @@ class SmtpSender(Sender):
     # --- отправка ---------------------------------------------------------
 
     def send(self, address: str, message: RenderedMessage) -> None:
-        self._throttle()
+        # Шаг выдерживается ДО открытия соединения и до всякого повтора: слот
+        # резервируется на письмо, а не на попытку записи в сокет.
+        self._pacer.wait_for_slot()
         try:
             self._send_once(address, message)
         except smtplib.SMTPServerDisconnected:
@@ -100,7 +110,6 @@ class SmtpSender(Sender):
         self.open()
         assert self._smtp is not None
         self._smtp.send_message(self._build(address, message))
-        self._last_sent_at = time.monotonic()
 
     def _build(self, address: str, message: RenderedMessage) -> EmailMessage:
         mail = EmailMessage()
@@ -119,12 +128,6 @@ class SmtpSender(Sender):
         else:
             mail.set_content(message.body)
         return mail
-
-    def _throttle(self) -> None:
-        min_interval = 1.0 / settings.NOTIFY_SMTP_RATE_PER_SECOND
-        elapsed = time.monotonic() - self._last_sent_at
-        if self._last_sent_at and elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
 
 
 def _strip_tags(html: str) -> str:

@@ -30,6 +30,13 @@ INSECURE_DEFAULT_JWT_SECRET = 'secret'
 
 DENYLIST_ERROR_POLICIES = frozenset({'raise', 'allow', 'deny'})
 
+# Область действия темпа отправки. Живёт ЗДЕСЬ, а не рядом с самим пейсером
+# (`channels/pacing.py`), потому что тот читает настройки — обратный импорт
+# замкнул бы цикл.
+RATE_SCOPE_GLOBAL = 'global'
+RATE_SCOPE_PROCESS = 'process'
+SMTP_RATE_SCOPES = frozenset({RATE_SCOPE_GLOBAL, RATE_SCOPE_PROCESS})
+
 
 def _split_csv(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(',') if item.strip()]
@@ -67,6 +74,20 @@ class Settings(BaseSettings):
     # переотправил бы всю пачку.
     NOTIFY_AMQP_HEARTBEAT: int = 600
     NOTIFY_AMQP_BLOCKED_TIMEOUT: int = 300
+    # Тайм-ауты ПОДКЛЮЧЕНИЯ. Без них `pika.BlockingConnection` ждёт установления
+    # TCP столько, сколько отмерит ядро (минуты на blackhole), а планировщик —
+    # один поток, в котором за публикацией стоят тик расписаний, часовые чистки и
+    # веер. Самый частый отказ здесь — не «брокер завис», а «брокер
+    # перезапускается и не отвечает на SYN», и лечится он именно этими двумя.
+    #
+    # Чего они НЕ ограничивают — ожидание ответа на уже установленном соединении:
+    # это зона heartbeat, и он выше намеренно длинный. Отсюда и размер аренды
+    # строки outbox, см. NOTIFY_OUTBOX_CLAIM_TTL_SECONDS.
+    #
+    # `stack_timeout` — дедлайн всего подъёма TCP/[SSL]/AMQP; pika требует, чтобы
+    # он был не меньше `socket_timeout`.
+    NOTIFY_AMQP_SOCKET_TIMEOUT: float = Field(default=10.0, gt=0)
+    NOTIFY_AMQP_STACK_TIMEOUT: float = Field(default=15.0, gt=0)
     NOTIFY_PREFETCH_COUNT: int = Field(default=1, ge=1)
     NOTIFY_RETRY_TTL_MS: int = 30_000
     NOTIFY_MAX_ATTEMPTS: int = Field(default=5, ge=1)
@@ -89,7 +110,20 @@ class Settings(BaseSettings):
     # Ограничение скорости отправки: почтовый сервер — внешняя система, и уронить
     # его собственной рассылкой значит уронить и себя (теория, «Как посылать
     # быстрее»: Gmail — 500 писем в сутки, Exchange — 30 в минуту).
+    #
+    # Темп считается НА ВЕСЬ СЕРВИС, а не на процесс: отправляющий воркер
+    # масштабируется репликами, и попроцессный лимит давал бы в почтовый сервер
+    # `реплики × значение`, то есть отменялся бы добавлением мощности.
     NOTIFY_SMTP_RATE_PER_SECOND: float = Field(default=50.0, gt=0)
+    # `global` — общий слот в Redis ядра (том же, где денилист Auth);
+    # `process` — прежний попроцессный шаг, без обращений к Redis. Второй режим
+    # существует для одиночного стенда и как аварийный выключатель.
+    NOTIFY_SMTP_RATE_SCOPE: str = RATE_SCOPE_GLOBAL
+    # Потолок ожидания своего слота. В норме недостижим: слот резервируется перед
+    # ОДНИМ письмом, поэтому ждущих не больше, чем одновременно отправляющих
+    # процессов. Это страховка от абсурдной конфигурации, а не рабочая ручка:
+    # превышение отправляет получателя в штатный ярус повторов.
+    NOTIFY_SMTP_RATE_MAX_WAIT: float = Field(default=5.0, gt=0)
 
     # --- Веер и публикация ---
     NOTIFY_FANOUT_DB_BATCH: int = Field(default=500, ge=1)
@@ -130,6 +164,29 @@ class Settings(BaseSettings):
     # некуда доставить» приходят одним исключением: без потолка вторая
     # разновидность встала бы в голову очереди и остановила ВСЕ рассылки.
     NOTIFY_OUTBOX_MAX_ATTEMPTS: int = Field(default=10, ge=1)
+    # Аренда захваченной строки. Публикация идёт ВНЕ транзакции, поэтому взаимное
+    # исключение между репликами планировщика держит не блокировка строки, а эта
+    # отметка: захватив строку, реплика ставит `available_at` в будущее и уходит
+    # разговаривать с брокером.
+    #
+    # ЗНАЧЕНИЕ ПРИВЯЗАНО К HEARTBEAT, а не к тайм-аутам подключения выше. Молча
+    # исчезнувшего собеседника pika замечает только по пропущенным heartbeat, то
+    # есть `basic_publish` на уже установленном соединении может висеть до двух их
+    # интервалов. Аренда короче этого срока истекала бы, пока первая реплика ещё
+    # в эфире, — и дубль публикации перестал бы быть аварийным случаем, став
+    # штатным. Отношение проверяется на старте (`_validate_publish_timeouts`).
+    #
+    # Обратная сторона: если планировщика убить по SIGKILL прямо в публикации, его
+    # строка не двинется до конца аренды. Это редкий случай (SIGTERM отрабатывает
+    # штатно, между итерациями цикла), он виден в `outbox_pending`, и он дешевле
+    # регулярных дублей.
+    NOTIFY_OUTBOX_CLAIM_TTL_SECONDS: float = Field(default=1800.0, gt=0)
+    # Отсрочка после неудачной публикации. Без неё потолок попыток измерялся не в
+    # выносливости, а в секундах: слив крутится раз в секунду, и десятисекундная
+    # недоступность брокера навсегда выкидывала исправную строку из выборки.
+    # С экспонентой те же десять попыток — это уже ~20 минут терпимого отказа.
+    NOTIFY_OUTBOX_RETRY_START: float = Field(default=2.0, gt=0)
+    NOTIFY_OUTBOX_RETRY_MAX: float = Field(default=300.0, gt=0)
     # Порог, после которого /health/ready говорит degraded: неразобранный outbox
     # означает, что планировщик не работает или брокер недоступен, — сервис
     # отвечает, а рассылки стоят.
@@ -257,7 +314,39 @@ class Settings(BaseSettings):
                 f'NOTIFY_DENYLIST_ON_ERROR must be one of {sorted(DENYLIST_ERROR_POLICIES)}, '
                 f'got {self.NOTIFY_DENYLIST_ON_ERROR!r}'
             )
+        if self.NOTIFY_SMTP_RATE_SCOPE not in SMTP_RATE_SCOPES:
+            # Опечатка здесь молча вернула бы попроцессный лимит, то есть ровно
+            # ту ошибку, ради которой область действия и стала настройкой.
+            raise ValueError(
+                f'NOTIFY_SMTP_RATE_SCOPE must be one of {sorted(SMTP_RATE_SCOPES)}, got {self.NOTIFY_SMTP_RATE_SCOPE!r}'
+            )
         validate_environment(self.NOTIFY_ENV, key='NOTIFY_ENV', insecure_defaults=self.insecure_defaults)
+        return self
+
+    @model_validator(mode='after')
+    def _validate_publish_timeouts(self) -> 'Settings':
+        """Тайм-ауты публикации связаны друг с другом, и рассогласование тихое.
+
+        ``stack_timeout`` меньше ``socket_timeout`` pika не принимает вовсе. А
+        аренда строки outbox короче двух интервалов heartbeat — это дубль в
+        ШТАТНОМ режиме: вторая реплика подхватит строку ровно тогда, когда первая
+        ещё висит внутри ``basic_publish``, ожидая молча исчезнувший брокер.
+        Ловим на старте, а не по письмам, пришедшим дважды.
+        """
+        if self.NOTIFY_AMQP_STACK_TIMEOUT < self.NOTIFY_AMQP_SOCKET_TIMEOUT:
+            raise ValueError(
+                'NOTIFY_AMQP_STACK_TIMEOUT must be >= NOTIFY_AMQP_SOCKET_TIMEOUT '
+                f'({self.NOTIFY_AMQP_STACK_TIMEOUT} < {self.NOTIFY_AMQP_SOCKET_TIMEOUT})'
+            )
+        # Худшее время публикации: молча исчезнувшего собеседника pika замечает
+        # только по пропущенным heartbeat.
+        publish_deadline = self.NOTIFY_AMQP_HEARTBEAT * 2
+        if publish_deadline >= self.NOTIFY_OUTBOX_CLAIM_TTL_SECONDS:
+            raise ValueError(
+                'NOTIFY_OUTBOX_CLAIM_TTL_SECONDS must exceed 2 * NOTIFY_AMQP_HEARTBEAT '
+                f'({self.NOTIFY_OUTBOX_CLAIM_TTL_SECONDS} <= {publish_deadline}): a lease that expires '
+                'while the first replica is still inside basic_publish makes a duplicate publish routine'
+            )
         return self
 
     @property

@@ -173,8 +173,11 @@ npx nx run link-shortener:test-functional   # функциональные (св
 npx nx run link-shortener:migrate           # alembic upgrade head
 npx nx run link-shortener:docker
 
-# Уборка протухших ссылок (cron'а в стенде нет — команда ручная, как recount в UGC)
-docker compose ... exec link-shortener python -m practix_link_shortener.cli purge --before-days 30
+# Уборка протухших ссылок (cron'а в стенде нет — команда ручная, как recount в UGC).
+# Удаляет ПАЧКАМИ по --batch-size (по умолчанию SHORTENER_PURGE_BATCH): один DELETE
+# на всю таблицу был бы длинной транзакцией, конкурирующей с горячими редиректами
+# за блокировки, и разом раздул бы WAL.
+docker compose ... exec link-shortener python -m practix_link_shortener.cli purge --before-days 30 --batch-size 1000
 ```
 
 ## Не сделано (осознанно)

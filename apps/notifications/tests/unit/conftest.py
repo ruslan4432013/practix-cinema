@@ -12,7 +12,21 @@ import pytest
 
 from practix_notifications.campaigns.models import Campaign
 from practix_notifications.content.models import MessageTemplate
+from practix_notifications.core.config import RATE_SCOPE_PROCESS, settings
 from practix_notifications.subscribers.models import Subscriber
+
+
+@pytest.fixture(autouse=True)
+def _process_rate_scope(monkeypatch) -> None:
+    """Юнит-набор обязан проходить на голом раннере, где Redis нет.
+
+    По умолчанию темп отправки общий на сервис и живёт в Redis (см.
+    ``channels/pacing.py``); здесь он принудительно попроцессный, иначе каждое
+    письмо в тестах отправителя начиналось бы с похода в несуществующее
+    хранилище. Сам общий режим проверяет ``test_pacing.py`` на заглушке клиента и
+    функциональный набор — на настоящем Redis.
+    """
+    monkeypatch.setattr(settings, 'NOTIFY_SMTP_RATE_SCOPE', RATE_SCOPE_PROCESS)
 
 
 @pytest.fixture

@@ -246,7 +246,10 @@ class DeliveryTaskAdmin(admin.ModelAdmin):
 
 @admin.register(OutboxMessage)
 class OutboxMessageAdmin(admin.ModelAdmin):
-    list_display = ('routing_key', 'exchange', 'created_at', 'published_at', 'attempts')
+    # `available_at` — то поле, которое отвечает на вопрос «почему строка не
+    # двигается»: она либо прямо сейчас у кого-то в аренде, либо отложена после
+    # неудачи. Различает эти два случая соседний `attempts`.
+    list_display = ('routing_key', 'exchange', 'created_at', 'available_at', 'published_at', 'attempts')
     list_filter = ('exchange', 'routing_key')
     readonly_fields = tuple(field.name for field in OutboxMessage._meta.fields)
 

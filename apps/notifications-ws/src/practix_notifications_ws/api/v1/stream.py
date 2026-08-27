@@ -196,7 +196,15 @@ async def _revalidate(payload: TicketPayload) -> None:
         'поэтому при каждой смене транспорта клиент обязан догнать её по `since` и '
         'дедуплицировать по `task_id`.'
     ),
-    responses={status.HTTP_401_UNAUTHORIZED: {'description': 'Токен отсутствует, недействителен или отозван'}},
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {'description': 'Токен отсутствует, недействителен или отозван'},
+        status.HTTP_429_TOO_MANY_REQUESTS: {
+            'description': (
+                'Исчерпан бюджет одновременных long-poll-запросов (свой, не общий с сокетами). '
+                'Повторять не раньше `Retry-After`; лента кабинета доступна всегда.'
+            )
+        },
+    },
 )
 async def poll(
     wait: float | None = Query(default=None, description='Сколько держать запрос, секунды'),
@@ -213,9 +221,22 @@ async def poll(
     timeout = max(1.0, min(timeout, settings.NOTIFY_WS_POLL_MAX_TIMEOUT))
 
     hub = get_hub()
-    # Лимиты соединений здесь не проверяются: клиент, дошедший до long polling'а,
-    # УЖЕ деградировал, и отказ отправил бы его на ленту с минутными паузами.
-    subscription = hub.subscribe(subject, count_towards_limits=False)
+    # Бюджет сокетов здесь не тратится: клиент, дошедший до long polling'а, УЖЕ
+    # деградировал, и отказ ради чужого сокета отправил бы его на ленту. Но и
+    # безлимитным он быть не может — каждый висящий запрос держит задачу и
+    # очередь кадров до полуминуты, так что у поллеров свой потолок, и отказ по
+    # нему не отнимает ничего у недеградировавших.
+    try:
+        subscription = hub.subscribe(subject, count_towards_limits=False)
+    except ConnectionLimitReached as exc:
+        logger.warning('Rejected long-poll: %s', exc)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail='Слишком много одновременных long-poll-запросов',
+            # Ровно столько, сколько длился бы обычный запрос: к этому моменту
+            # слот освободится, а до тех пор клиенту есть куда пойти — лента.
+            headers={'Retry-After': str(max(1, int(settings.NOTIFY_WS_POLL_TIMEOUT)))},
+        ) from exc
     items: list[dict] = []
     try:
         try:

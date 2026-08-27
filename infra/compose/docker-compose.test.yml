@@ -757,6 +757,10 @@ services:
         condition: service_healthy
       mailpit:
         condition: service_healthy
+      # Общий слот темпа отправки лежит здесь же, где денилист (адрес приезжает
+      # из якоря x-notifications-env).
+      redis:
+        condition: service_healthy
     command: ["python", "-m", "practix_notifications.manage", "run_worker"]
 
   notifications-scheduler:
@@ -799,6 +803,9 @@ services:
       # закрыть предыдущий, и при щедром значении утечка подписки прошла бы
       # незамеченной. Сам лимит проверяется юнит-тестом реестра.
       NOTIFY_WS_MAX_CONNECTIONS_PER_USER: "2"
+      # Столько же поллеров: набору нужно достичь отказа тремя запросами, а не
+      # десятью. Бюджеты раздельные, поэтому одно значение другое не задевает.
+      NOTIFY_WS_MAX_POLLERS_PER_USER: "2"
       OTEL_ENABLED: "False"
       SENTRY_ENABLED: "False"
     depends_on:

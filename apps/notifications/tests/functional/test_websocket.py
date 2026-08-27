@@ -22,7 +22,9 @@
 
 import json
 import os
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import pytest
@@ -246,6 +248,38 @@ def test_long_polling_returns_empty_on_timeout(user):
     _, token = user
 
     assert long_poll(token, wait=2) == []
+
+
+def test_long_polling_has_a_budget_of_its_own(user):
+    """Деградация не должна быть вектором отказа в обслуживании.
+
+    Раньше ``/poll`` не проверял вообще ничего: ни лимита соединений, ни своего.
+    Один пользователь держал сколько угодно параллельных запросов, каждый с
+    задачей и очередью кадров, — и выедал память процесса. Теперь у поллеров свой
+    потолок (на стенде — два на пользователя), отдельный от сокетного: отказ
+    здесь никогда не отнимает слот у клиента с живым сокетом, а отказанному
+    остаётся ступень ниже — лента кабинета.
+    """
+    _, token = user
+    held = 2  # NOTIFY_WS_MAX_POLLERS_PER_USER на тестовом стенде
+
+    with ThreadPoolExecutor(max_workers=held) as pool:
+        waiting = [pool.submit(long_poll, token, wait=10) for _ in range(held)]
+        # Запросы должны реально висеть на сервере к моменту третьего.
+        time.sleep(2)
+
+        response = requests.get(
+            f'{WS_URL}/api/v1/ws/poll',
+            headers={'Authorization': f'Bearer {token}'},
+            params={'wait': 5},
+            timeout=15,
+        )
+
+        assert response.status_code == 429, response.text
+        # Без Retry-After клиент вернулся бы мгновенно и молотил бы отказами.
+        assert int(response.headers['Retry-After']) >= 1
+        for future in waiting:
+            future.result(timeout=30)
 
 
 def test_long_polling_requires_a_valid_token(subscriber):
