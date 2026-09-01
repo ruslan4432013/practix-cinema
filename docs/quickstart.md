@@ -56,7 +56,7 @@ $DC exec clickhouse-01 clickhouse-client --user etl --password etl \
 
 # 6. Рекомендации. Выдача живёт в ядре, обучение — в профиле warehouse.
 #    Стенд поднимается с пустым ClickHouse, поэтому историю просмотров сначала
-#    генерируем: без взаимодействий обучать нечего (раздел 8 diploma-tz.md).
+#    генерируем: без взаимодействий обучать нечего.
 $DC exec recsys-trainer python -m practix_recsys_trainer.cli stats
 $DC exec recsys-trainer python -m practix_recsys_trainer.cli generate \
     --sink clickhouse --users 5000 --seed 42
