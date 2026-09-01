@@ -26,6 +26,17 @@ scrape_configs:
           - 'clickhouse-03:9363'
           - 'clickhouse-04:9363'
 
+  # Рекомендации: выдача и батч. Обе цели нужны вместе по той же причине, что
+  # обе стороны конвейера ETL: «выдача отдаёт популярное» и «обучение не
+  # состоялось» выглядят одинаково, если видеть только выдачу.
+  - job_name: recommendations-api
+    static_configs:
+      - targets: ['recommendations-api:8000']
+
+  - job_name: recsys-trainer
+    static_configs:
+      - targets: ['recsys-trainer:8000']
+
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']

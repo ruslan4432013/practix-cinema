@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Один файл на все восемь Python-сервисов. До этого было пять Dockerfile'ов, из
+# Один файл на все одиннадцать Python-сервисов. До этого было пять Dockerfile'ов, из
 # которых четыре — один шаблон с подставленными значениями, с побайтово
 # одинаковой четырёхстрочной шапкой. Ни один не использовал multi-stage, кеш
 # BuildKit или общий базовый слой, поэтому каждый сервис заново ставил весь свой
@@ -60,6 +60,8 @@ COPY apps/ugc-api/pyproject.toml              apps/ugc-api/
 COPY apps/notifications/pyproject.toml        apps/notifications/
 COPY apps/notifications-ws/pyproject.toml     apps/notifications-ws/
 COPY apps/link-shortener/pyproject.toml       apps/link-shortener/
+COPY apps/recommendations-api/pyproject.toml  apps/recommendations-api/
+COPY apps/recsys-trainer/pyproject.toml       apps/recsys-trainer/
 
 # --locked: сборка ПАДАЁТ на устаревшем локе. Это и есть замена никогда не
 # существовавшему constraints.txt — утверждение, проверяемое на сборке, а не
@@ -204,3 +206,50 @@ FROM runtime AS link-shortener
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
   CMD python -c "import sys,urllib.request as u; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id':'healthcheck'}); sys.exit(0 if u.urlopen(r,timeout=3).status==200 else 1)"
 CMD ["uvicorn", "practix_link_shortener.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+
+FROM runtime AS recommendations-api
+# Десятый сервис. Работа на горячем пути — чтение готового списка из Redis, и
+# упирается он в сеть, а не в процессор: четырёх воркеров хватает с
+# десятикратным запасом против плановых 100 RPS (раздел 6 ТЗ).
+#
+# Метрики нескольких воркеров складываются в mmap-файлы общего каталога — иначе
+# скрейп попадал бы в случайный воркер и показывал четверть трафика.
+ENV PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc
+# X-Request-Id в пробе обязателен: RequestIdMiddleware работает в режиме
+# reject_400 (сервис живёт за nginx, который заголовок проставляет), и без него
+# контейнер никогда не стал бы healthy. Проба идёт на /health/live: перезапуск
+# контейнера не чинит упавший PostgreSQL.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
+  CMD python -c "import sys,urllib.request as u; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id':'healthcheck'}); sys.exit(0 if u.urlopen(r,timeout=3).status==200 else 1)"
+CMD ["uvicorn", "practix_recommendations_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+
+FROM runtime AS recsys-trainer
+# Одиннадцатый сервис и второй батч в этом файле после etl-elasticsearch.
+#
+# PROMETHEUS_MULTIPROC_DIR здесь НЕ задаётся намеренно, по той же причине, что
+# у etl-clickhouse: процесс один, а multiproc-режим отключает ProcessCollector
+# и GCCollector — ровно те коллекторы, по которым видно поведение памяти на
+# матрице в сотни мегабайт.
+#
+# ЕДИНСТВЕННЫЙ ТАРГЕТ С СИСТЕМНОЙ ЗАВИСИМОСТЬЮ. `implicit` собран с OpenMP и
+# при импорте грузит libgomp.so.1, которой в python:*-slim нет. Отказ при этом
+# ОЧЕНЬ тихий: колесо ставится, `uv sync` доволен, образ собирается, и падает
+# только сам вызов ALS — в рантайме, внутри except, который честно пишет
+# «версия выйдет без персональной выдачи» и публикует витрину без неё. То есть
+# E6 просто молча не работал бы, а всё остальное выглядело бы исправным.
+#
+# Каталог под выгрузки создаётся В ОБРАЗЕ и заранее отдаётся appuser. Docker
+# переносит владельца каталога образа на пустой том, и без этого именованный
+# том пришёл бы root'овым, а процесс под uid 1001 не смог бы записать матрицу —
+# ровно та тихая поломка, что описана у etl-elasticsearch.
+USER root
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+ && mkdir -p /var/lib/recsys && chown appuser:appuser /var/lib/recsys
+USER appuser
+# Проба на /metrics: HTTP-порт у сервиса есть только под них, и они же
+# подтверждают, что процесс жив и цикл расписания крутится.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=8 \
+  CMD python -c "import sys,urllib.request as u; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/metrics',timeout=3).status==200 else 1)"
+CMD ["python", "-m", "practix_recsys_trainer.main"]

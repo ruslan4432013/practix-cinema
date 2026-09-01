@@ -889,6 +889,12 @@ services:
     volumes:
       - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ../nginx/configs:/etc/nginx/conf.d:ro
+      # Страницы ошибок. Отдельный том обязателен: в образе nginx нет ни
+      # каталога `html` из исходной сборки, ни чего-либо ещё по пути, куда
+      # смотрел прежний `error_page`. Без этой строки промах по файлу снова
+      # превратит любой 502/504 в 404 — см. блок «Страницы ошибок» в
+      # ../nginx/configs/site.conf.
+      - ../nginx/html:/data/errors:ro
       - static_volume:/data/static/
     # Форма с condition, а не короткий список: короткая ждёт лишь СТАРТА
     # контейнера, а не готовности приложения в нём. Auth добавлен в список
@@ -918,6 +924,14 @@ services:
       # обязана открываться как http://localhost/s/AbC1234 — это и есть повод
       # держать сервис в ядре, а не в профиле.
       link-shortener:
+        condition: service_healthy
+      # И снова без required: false, и снова по той же причине: блок
+      # рекомендаций маршрутизирует nginx (^~ /api/v1/recommendations), а
+      # значит upstream обязан резолвиться на старте. Батч, который эту
+      # витрину наполняет, при этом сидит в профиле `warehouse` — от него
+      # nginx не зависит вовсе, и выдача без обученной модели честно отдаёт
+      # популярное.
+      recommendations-api:
         condition: service_healthy
     ports:
       - "${NGINX_HOST_PORT:-80}:80"
@@ -1224,6 +1238,172 @@ services:
   #    Плюс `location /admin` уже принадлежит контентной админке. Панель
   #    публикуется прямым хост-портом.
 
+  # ================= Рекомендации =========================================
+  #
+  # ВЫДАЧА — В ЯДРЕ, БЕЗ ПРОФИЛЯ, по той же причине, что ugc-api и
+  # link-shortener: её маршрутизирует nginx, а nginx резолвит upstream'ы на
+  # старте и умирает с «host not found in upstream», если контейнера нет.
+  #
+  # ОБУЧЕНИЕ — В ПРОФИЛЕ `warehouse`, вместе с ClickHouse, из которого оно
+  # читает. Отдельный профиль был бы третьим, который надо не забыть повторить
+  # на `down -v`; а привязка к тому же профилю, что и источник, читается
+  # однозначно: нет ClickHouse — нечему и учиться.
+  #
+  # Ядро при этом работает без профиля целиком: витрина пуста, выдача отдаёт
+  # 200 с пустым популярным (F1.3), страница фильма не ломается.
+  recs-db:
+    image: postgres:16
+    container_name: recs-db
+    environment:
+      POSTGRES_USER: ${RECS_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${RECS_POSTGRES_PASSWORD:-secret}
+      POSTGRES_DB: ${RECS_POSTGRES_DB:-recs_database}
+    # 5432 — theatre-db, 5433 — auth-db, 5434 — стенд исследования,
+    # 5435 — ugc-db, 5436 — notifications-db, 5437 — shortener-db.
+    ports:
+      - "${RECS_DB_HOST_PORT:-5438}:5432"
+    volumes:
+      - recs_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${RECS_POSTGRES_USER:-postgres} -d ${RECS_POSTGRES_DB:-recs_database}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - movies_net
+
+  # Отдельный экземпляр Redis под горячий слой витрины. Не база в общем redis:
+  # там `volatile-lru` делит память с сессиями Auth и кэшем каталога, и ночная
+  # раскладка витрины вытесняла бы чужие ключи. Разные экземпляры — разная
+  # судьба при отказе, ровно как у redis-ugc.
+  #
+  # volatile-lru здесь ПРАВИЛЬНАЯ политика, в отличие от noeviction у redis-ugc:
+  # все ключи витрины имеют TTL и восстановимы из PostgreSQL. Вытеснение стоит
+  # промаха кэша, а не потери данных.
+  redis-recs:
+    image: redis:7-alpine
+    container_name: redis-recs
+    command: >
+      redis-server
+      --maxmemory ${RECS_REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy volatile-lru
+    volumes:
+      - redis_recs_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - movies_net
+
+  # Образ тот же, что у `recommendations-api`: миграции и приложение обязаны
+  # запускаться из одного набора байт. Схемой витрины владеет выдача, а не
+  # батч, — она в ядре и поднимается всегда, тогда как образа батча на голом
+  # ядре может не быть вовсе.
+  recs-migrations:
+    image: practix/recommendations-api:local
+    container_name: recs-migrations
+    env_file:
+      - ../../.env
+    environment:
+      RECS_POSTGRES_HOST: recs-db
+      RECS_POSTGRES_PORT: 5432
+    depends_on:
+      recs-db:
+        condition: service_healthy
+    command: >
+      sh -c "alembic -c apps/recommendations-api/alembic.ini upgrade head"
+    networks:
+      - movies_net
+
+  recommendations-api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: recommendations-api
+      args:
+        PACKAGE: practix-recommendations-api
+    image: practix/recommendations-api:local
+    container_name: recommendations-api
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: recommendations-api
+      RECS_POSTGRES_HOST: recs-db
+      RECS_POSTGRES_PORT: 5432
+      RECS_REDIS_HOST: redis-recs
+      RECS_REDIS_PORT: 6379
+      RECS_MOVIES_API_URL: http://api:8000
+    expose:
+      - "8000"
+    depends_on:
+      recs-db:
+        condition: service_healthy
+      recs-migrations:
+        condition: service_completed_successfully
+      redis-recs:
+        condition: service_healthy
+      # Ядровый redis — за денилистом отозванных токенов: его ведёт Auth, и
+      # читать его надо там же, где он пишется.
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/health/live', headers={'X-Request-Id': 'healthcheck'}); sys.exit(0 if u.urlopen(r, timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - movies_net
+
+  # Батч. Healthcheck есть, но на /metrics: HTTP-порт у процесса только под них.
+  # Масштабировать репликами НЕЛЬЗЯ — витрину пишет ровно один писатель
+  # (раздел 5.3 ТЗ), и pg_advisory_lock здесь страховка, а не разрешение.
+  recsys-trainer:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: recsys-trainer
+      args:
+        PACKAGE: practix-recsys-trainer
+    image: practix/recsys-trainer:local
+    container_name: recsys-trainer
+    profiles:
+      - warehouse
+    env_file:
+      - ../../.env
+    environment:
+      OTEL_SERVICE_NAME: recsys-trainer
+      RECS_POSTGRES_HOST: recs-db
+      RECS_POSTGRES_PORT: 5432
+      RECS_REDIS_HOST: redis-recs
+      RECS_REDIS_PORT: 6379
+      UGC_API_POSTGRES_HOST: ugc-db
+      UGC_API_POSTGRES_PORT: 5432
+      POSTGRES_HOST: theatre-db
+      POSTGRES_PORT: 5432
+      RECS_TRAINER_COLLECTOR_URL: http://analytics-collector:8000
+    ports:
+      - "${RECS_TRAINER_METRICS_HOST_PORT:-9102}:8000"
+    volumes:
+      - recs_trainer_data:/var/lib/recsys
+    depends_on:
+      # clickhouse-init, а не сами узлы: без применённой DDL таблицы
+      # ugc.film_views ещё нет, и первый же прогон упал бы на SELECT.
+      clickhouse-init:
+        condition: service_completed_successfully
+      recs-migrations:
+        condition: service_completed_successfully
+      theatre-db:
+        condition: service_healthy
+      redis-recs:
+        condition: service_healthy
+    networks:
+      - movies_net
+
   notifications-db:
     profiles: ["notifications"]
     image: postgres:16
@@ -1508,6 +1688,9 @@ volumes:
   auth_pg_data:
   ugc_pg_data:
   shortener_pg_data:
+  recs_pg_data:
+  redis_recs_data:
+  recs_trainer_data:
   notifications_pg_data:
   rabbitmq_data:
   kafka_0_data:

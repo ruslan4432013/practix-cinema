@@ -12,10 +12,9 @@
 которая тот же клиент пингует.
 """
 
-import asyncio
-
 from redis.asyncio import Redis
 
+from practix_core.health import reachable
 from practix_ugc_api.core.config import settings
 
 auth_redis: Redis | None = None
@@ -43,15 +42,8 @@ async def denylist_reachable(client: Redis | None) -> bool:
     ``on_error='deny'`` обе ветки трактует как «токен отозван»
     (``practix_core.jwt``).
 
-    Собственный лимит времени, а не только ``socket_connect_timeout`` клиента:
-    redis-py повторяет неудачное соединение (по умолчанию три раза с джиттером),
-    и на старте это растянуло бы запуск на секунды при недоступном Redis.
+    Сама проверка вынесена в ``practix_core.health``: та же функция понадобилась
+    выдаче рекомендаций (и там сразу дважды — для витрины и для денилиста), и
+    третья копия пробила бы порог дублирования.
     """
-    if client is None:
-        return False
-    try:
-        async with asyncio.timeout(settings.UGC_API_REDIS_TIMEOUT * 3):
-            await client.ping()
-    except Exception:  # noqa: BLE001 — любая ошибка здесь означает «денилист недоступен»
-        return False
-    return True
+    return await reachable(client, settings.UGC_API_REDIS_TIMEOUT)

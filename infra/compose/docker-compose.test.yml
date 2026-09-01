@@ -102,6 +102,14 @@ x-auth-env: &auth-test-env
   OTEL_ENABLED: "False"
   SENTRY_ENABLED: "False"
 
+x-recs-api-build: &recs-api-test-build
+  context: ../..
+  dockerfile: infra/docker/python-service.Dockerfile
+  target: recommendations-api
+  args:
+    PACKAGE: practix-recommendations-api
+    UV_GROUPS: --group test
+
 services:
   elasticsearch:
     image: elasticsearch:9.4.1
@@ -358,6 +366,129 @@ services:
   # отказоустойчивость кластера, и лишние два узла только замедляют прогон.
   # Отсюда же RF=1 и min.insync.replicas=1 — с RF=3 на одном узле создание
   # топиков просто не прошло бы.
+  # ================= Рекомендации =========================================
+  recs-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: recs_database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d recs_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-recs:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  recommendations-api-tests:
+    build: *recs-api-test-build
+    image: practix/recommendations-api:test
+    environment:
+      - PYTEST_ADDOPTS=-p no:cacheprovider
+      - RECS_POSTGRES_HOST=recs-db
+      - RECS_POSTGRES_PORT=5432
+      - RECS_POSTGRES_USER=postgres
+      - RECS_POSTGRES_PASSWORD=secret
+      - RECS_POSTGRES_DB=recs_database
+      - RECS_REDIS_HOST=redis-recs
+      - RECS_REDIS_PORT=6379
+      # Денилист отозванных токенов сервис читает из Redis Auth-сервиса — это
+      # ДРУГОЙ экземпляр, не redis-recs. Один клиент на оба назначения искал бы
+      # денилист не в той базе; ровно на этом однажды обжёгся коллектор.
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Тот же секрет, которым practix_testing подписывает тестовые токены.
+      - AUTHJWT_SECRET_KEY=secret
+      # Обогащение проверяется заглушкой Movies API через dependency_overrides:
+      # набор проверяет поведение выдачи, а не каталог.
+      - RECS_ENRICH_ENABLED=True
+      - OTEL_ENABLED=False
+      - SENTRY_ENABLED=False
+    depends_on:
+      recs-db:
+        condition: service_healthy
+      redis-recs:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # ENTRYPOINT и working_dir не переопределяются — см. подробный комментарий у
+    # auth-tests: entrypoint.sh создаёт .env из .env.example, а pydantic-settings
+    # ищет .env относительно рабочего каталога образа.
+    command: ["pytest", "/opt/app/apps/recommendations-api/tests/functional", "-v"]
+
+  # Схему витрины накатывает ОТДЕЛЬНЫЙ одноразовый контейнер, а не conftest
+  # набора. Причина не в стиле: миграции живут в пакете practix-recommendations-api,
+  # а в образе батча установлен только practix-recsys-trainer — ни alembic, ни
+  # модулей выдачи там нет, и `alembic upgrade head` изнутри набора просто не
+  # запустится. Та же схема, что на боевом стенде: миграции идут образом того
+  # сервиса, которому принадлежит схема.
+  recs-migrations-test:
+    build: *recs-api-test-build
+    image: practix/recommendations-api:test
+    environment:
+      - RECS_POSTGRES_HOST=recs-db
+      - RECS_POSTGRES_PORT=5432
+      - RECS_POSTGRES_USER=postgres
+      - RECS_POSTGRES_PASSWORD=secret
+      - RECS_POSTGRES_DB=recs_database
+    depends_on:
+      recs-db:
+        condition: service_healthy
+    command: ["alembic", "-c", "apps/recommendations-api/alembic.ini", "upgrade", "head"]
+
+  # Набор батча идёт против ОДНОУЗЛОВОГО clickhouse и clickhouse-init-test,
+  # которые уже объявлены в этом файле для набора ETL. Второй экземпляр
+  # ClickHouse ради того же самого был бы минутой ожидания на пустом месте.
+  recsys-trainer-tests:
+    build:
+      context: ../..
+      dockerfile: infra/docker/python-service.Dockerfile
+      target: recsys-trainer
+      args:
+        PACKAGE: practix-recsys-trainer
+        UV_GROUPS: --group test
+    image: practix/recsys-trainer:test
+    environment:
+      - PYTEST_ADDOPTS=-p no:cacheprovider
+      - CH_HOSTS=clickhouse:8123
+      - CH_USER=etl
+      - CH_PASSWORD=etl
+      - CH_DATABASE=ugc
+      - RECS_POSTGRES_HOST=recs-db
+      - RECS_POSTGRES_PORT=5432
+      - RECS_POSTGRES_USER=postgres
+      - RECS_POSTGRES_PASSWORD=secret
+      - RECS_POSTGRES_DB=recs_database
+      - RECS_REDIS_HOST=redis-recs
+      - RECS_REDIS_PORT=6379
+      # Каталога и оценок на этом стенде нет: набор подставляет свои
+      # идентификаторы фильмов. Отключено явно, чтобы прогон не ждал таймаута
+      # соединения с несуществующими базами.
+      - RECS_TRAINER_RATINGS_ENABLED=False
+      # Порог 2 на пустяковых выборках отрезал бы всё; набор строит данные сам
+      # и сам решает, что считать сигналом.
+      - RECS_TRAINER_MIN_COMPLETION=0.1
+      - RECS_TRAINER_WARMUP_FILMS=50
+      - RECS_TRAINER_ALS_ITERATIONS=3
+      - OTEL_ENABLED=False
+      - SENTRY_ENABLED=False
+    depends_on:
+      clickhouse-init-test:
+        condition: service_completed_successfully
+      recs-migrations-test:
+        condition: service_completed_successfully
+      redis-recs:
+        condition: service_healthy
+    command: ["pytest", "/opt/app/apps/recsys-trainer/tests/functional", "-v"]
+
   kafka:
     image: apache/kafka:3.9.1
     environment:

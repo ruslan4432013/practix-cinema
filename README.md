@@ -1,6 +1,6 @@
 # 🎬 Async API — Онлайн-кинотеатр
 
-Асинхронная платформа онлайн-кинотеатра: read-only API поиска фильмов, сервис авторизации с JWT и ролями, админка Django, пользовательский контент (оценки, закладки, рецензии), сбор пользовательских действий в Kafka, рассылки с подтверждением email по коротким ссылкам, аналитическое хранилище на ClickHouse и полная observability-обвязка. **Nx-монорепозиторий**: сервисы в `apps/`, общий код в `libs/`, инфраструктура в `infra/`. Стенд поднимается одним `infra/compose/docker-compose.yml` за Nginx. Python 3.13 (админка Django — 3.12).
+Асинхронная платформа онлайн-кинотеатра: read-only API поиска фильмов, сервис авторизации с JWT и ролями, админка Django, пользовательский контент (оценки, закладки, рецензии), сбор пользовательских действий в Kafka, рассылки с подтверждением email по коротким ссылкам, рекомендации (похожие фильмы, персональные подборки, популярное), аналитическое хранилище на ClickHouse и полная observability-обвязка. **Nx-монорепозиторий**: сервисы в `apps/`, общий код в `libs/`, инфраструктура в `infra/`. Стенд поднимается одним `infra/compose/docker-compose.yml` за Nginx. Python 3.13 (админка Django — 3.12).
 
 [Ссылка на репозиторий](https://github.com/ruslan4432013/practix-cinema)
 
@@ -44,6 +44,7 @@ flowchart TB
     nginx --> auth["Auth service"]
     nginx --> django["Django Admin"]
     nginx --> collector["Analytics Collector"]
+    nginx --> recs["Recommendations API"]
 
     movies -. "проверка прав<br/>(с деградацией)" .-> auth
 
@@ -60,13 +61,26 @@ flowchart TB
     kafka --> etlch["etl-clickhouse"]
     etlch --> ch[("ClickHouse<br/>2 шарда × 2 реплики + Keeper ×3<br/>raw_events / film_views / витрины")]
 
-    movies & auth & django & collector & etlch -. "OTLP-спаны" .-> jaeger["Jaeger :16686"]
-    collector & etlch & ch -. "метрики" .-> prom["Prometheus :9090"] --> grafana["Grafana :3000"]
-    movies & auth & django & collector & etlch & etl -. "ошибки" .-> glitchtip["GlitchTip :8001<br/>Sentry-совместимый приёмник"]
-    nginx & movies & auth & django & collector & etlch & etl -. "JSON в stdout" .-> filebeat["Filebeat"] --> logstash["Logstash :5044"] --> eslogs[("Elasticsearch логов :9210<br/>practix-logs-YYYY.MM.DD")] --> kibana["Kibana :5601"]
+    ch --> trainer["recsys-trainer<br/>батч, профиль warehouse"]
+    trainer --> recsdb[("recs-db<br/>витрина топ-N")]
+    trainer --> redisrecs[("redis-recs<br/>горячий слой")]
+    recs --> redisrecs
+    recs --> recsdb
+    recs -. "денилист" .-> redis
+
+    movies & auth & django & collector & etlch & recs -. "OTLP-спаны" .-> jaeger["Jaeger :16686"]
+    collector & etlch & ch & recs & trainer -. "метрики" .-> prom["Prometheus :9090"] --> grafana["Grafana :3000"]
+    movies & auth & django & collector & etlch & etl & recs -. "ошибки" .-> glitchtip["GlitchTip :8001<br/>Sentry-совместимый приёмник"]
+    nginx & movies & auth & django & collector & etlch & etl & recs -. "JSON в stdout" .-> filebeat["Filebeat"] --> logstash["Logstash :5044"] --> eslogs[("Elasticsearch логов :9210<br/>practix-logs-YYYY.MM.DD")] --> kibana["Kibana :5601"]
 ```
 
-Девять сервисов, около двух десятков контейнеров, четыре узла ClickHouse. Состав
+Схема выше — **магистральный путь данных, а не карта стенда**: UGC API, короткие
+ссылки, рассылки и websocket-шлюз на ней намеренно не показаны. Пять узлов со
+своими базами превратили бы поток во вторую копию карты — а карта уже есть, и
+две пришлось бы держать в согласии друг с другом.
+
+Одиннадцать Python-сервисов плюс админка Django; со всеми профилями стенд — это
+58 контейнеров (28 из них ядро), из них четыре узла ClickHouse. Полный состав
 стенда, порты и хранилища — в [`docs/architecture.md`](docs/architecture.md).
 
 ---
@@ -78,6 +92,8 @@ flowchart TB
 * **Данные не теряются при отказе ClickHouse** — оффсеты коммитятся только после вставки, чтение из Kafka ставится на паузу, сама Kafka играет роль неограниченного буфера.
 * **Дедупликация в три уровня** — `set` по `event_id` в пачке → `insert_deduplication_token` → `ReplacingMergeTree`.
 * **Уведомление доходит, даже когда websocket отвалился** — изящная деградация в три ступени: сокет → long polling → долговечная лента кабинета, склейка по `task_id`.
+* **Блок рекомендаций не роняет страницу фильма** — лестница деградации Redis → PostgreSQL → последнее известное популярное из памяти процесса → 200 с пустым списком, и ответ всегда называет свой источник.
+* **Рекомендации считает ночной батч, а выдача только читает** — шов между ними витрина топ-N, версия батча входит в первичный ключ каждой таблицы: повторный прогон физически не может удвоить строки, а выдача видит целостный батч.
 * **Один `request_id` от Nginx до строки лога** — общий идентификатор связывает трейс в Jaeger, ошибку в GlitchTip и логи в Kibana.
 * **Преагрегат рейтинга вместо агрегации на лету** — разница в 13 раз на популярном фильме; лайки выводятся из гистограммы по настраиваемому порогу, а не хранятся.
 * **Исследование хранилища под UGC на 10 млн оценок** — MongoDB vs PostgreSQL vs ClickHouse, честные замеры p99 на живом шардированном кластере.
@@ -107,6 +123,21 @@ Movies API под `wrk` (200 000 фильмов в Elasticsearch, кэш Redis):
 (152.3 против 0.9 мс). Отсюда и выбор хранилища для `apps/ugc-api/`.
 Методика и полные таблицы — [`research/ugc-storage/`](research/ugc-storage/README.md).
 
+Качество рекомендаций против baseline «просто популярное» (5000 синтетических
+зрителей, 999 реальных фильмов, отложенная **по времени** выборка, k=10):
+со-встречаемость даёт precision@10 **0.0527** против 0.0048 у baseline и покрытие
+каталога **84 %** против 1 %, ALS — 0.0471 и 85 %. Обе модели обгоняют baseline
+примерно на порядок по точности и на два по покрытию; методика и оговорки про
+синтетику — [`docs/recommendations.md`](docs/recommendations.md).
+
+Выдача рекомендаций под нагрузкой (k6, проектные 100 RPS с восьми адресов,
+плато 60 с, витрина на 49 719 зрителях): **p95 43,9 мс** при SLO 200 мс,
+**p99 47,8 мс** при SLO 300 мс, ноль 5xx и ноль 429 на 6 000 запросов. Ночной
+батч обучения — **19,5 с** на 494 661 взаимодействии при SLO «< 2 ч». Парный
+прогон с одного адреса отдаёт 70% отказов, то есть лимитер при этом жив, а не
+выключен ради красивой цифры. Условия и оговорки —
+[`docs/recommendations.md`](docs/recommendations.md#замеры-slo).
+
 Дублирование кода — **0.65 %** против 4.53 % до переезда на монорепозиторий, с
 жёстким гейтом `jscpd` в CI.
 
@@ -118,8 +149,8 @@ Movies API под `wrk` (200 000 фильмов в Elasticsearch, кэш Redis):
 cp .env.example .env
 DC="docker compose --env-file .env -f infra/compose/docker-compose.yml --project-directory infra/compose"
 
-$DC up -d --build                    # ядро: 15 сервисов
-#   + --profile warehouse       ClickHouse, Keeper, ETL ClickHouse
+$DC up -d --build                    # ядро: 28 сервисов
+#   + --profile warehouse       ClickHouse, Keeper, ETL ClickHouse, обучение рекомендаций
 #   + --profile observability   Prometheus, Grafana, Kafka UI, GlitchTip
 #   + --profile logging         Elasticsearch (логи), Logstash, Kibana, Filebeat
 #   + --profile notifications   Панель рассылок, сборщик, отправитель, планировщик,
@@ -128,12 +159,18 @@ $DC up -d --build                    # ядро: 15 сервисов
 uv run --with psycopg2-binary --with faker python seed_db.py   # тестовые данные
 ```
 
+Выдача рекомендаций живёт в **ядре** (её маршрутизирует nginx, а тот резолвит
+апстримы на старте), а обучение — в профиле `warehouse`, рядом с ClickHouse,
+из которого оно читает просмотры. Без профиля витрина пуста, выдача отдаёт
+популярное, и страница фильма цела.
+
 Полный сценарий (суперпользователь, сквозная проверка события до витрин в
 ClickHouse, проверка отказоустойчивости и утечек памяти, полезные адреса) —
 [`docs/quickstart.md`](docs/quickstart.md). Всем профилям вместе Docker нужно
 выделить ≥16 ГБ RAM (без профиля `logging` — ≥12 ГБ).
 
 Открыть после запуска: Swagger Movies API — http://localhost/api/openapi,
+Swagger рекомендаций — http://localhost/api/recommendations/openapi,
 Jaeger — http://localhost:16686, Grafana — http://localhost:3000,
 Kibana — http://localhost:5601 (профиль `logging`),
 панель рассылок — http://localhost:8090/admin/ (профиль `notifications`),
@@ -171,6 +208,7 @@ Kibana — http://localhost:5601 (профиль `logging`),
 | [`docs/monorepo.md`](docs/monorepo.md) | Устройство монорепозитория, решения и ловушки |
 | [`docs/notifications.md`](docs/notifications.md) | Проектное решение сервиса нотификаций (задания спринта 10) |
 | [`docs/websockets.md`](docs/websockets.md) | Websocket-шлюз мгновенных уведомлений и деградация на long polling |
+| [`docs/recommendations.md`](docs/recommendations.md) | Рекомендательная система: витрина, лестница деградации, качество моделей (дипломный трек) |
 
 Документация сервисов: [Auth](apps/auth/README.md) ·
 [Analytics Collector](apps/analytics-collector/README.md) ·
@@ -179,6 +217,8 @@ Kibana — http://localhost:5601 (профиль `logging`),
 [Нотификации](apps/notifications/README.md) ·
 [Websocket-шлюз](apps/notifications-ws/README.md) ·
 [Сокращение ссылок](apps/link-shortener/README.md) ·
+[Recommendations API](apps/recommendations-api/README.md) ·
+[Recsys Trainer](apps/recsys-trainer/README.md) ·
 [ELK](infra/elk/README.md) ·
 [Исследование хранилища UGC](research/ugc-storage/README.md) ·
 [Нагрузочные тесты](loadtests/README.md)

@@ -43,6 +43,25 @@ export function clientHeaders() {
 
 // X-Request-Id обязателен для Movies API и Auth (middleware отвечает 400 без
 // него); коллектор, наоборот, генерирует его сам — см. core/request_id.py.
-export function tracedHeaders() {
-  return Object.assign(clientHeaders(), { 'X-Request-Id': randomUUID() });
+export function tracedHeaders(extra) {
+  return Object.assign(clientHeaders(), { 'X-Request-Id': randomUUID() }, extra || {});
+}
+
+// Синтетический адрес клиента для X-Forwarded-For.
+//
+// Зачем: лимитеры nginx считают ПО АДРЕСУ (`limit_req_zone $binary_remote_addr`),
+// а генератор нагрузки приходит с одного. Без подстановки потолок сценария
+// задаёт не сервис, а зона — и проектная интенсивность оказывается недостижимой
+// в принципе. nginx настроен доверять прокси из приватных сетей
+// (`set_real_ip_from 172.16.0.0/12` и соседние строки в infra/nginx/nginx.conf),
+// в одну из которых попадает контейнер k6 в сети compose, поэтому подставленный
+// адрес попадает в $binary_remote_addr штатным путём модуля realip — до фазы,
+// на которой работает limit_req.
+//
+// Диапазон 203.0.113.0/24 — это TEST-NET-3 (RFC 5737), и выбран он не для
+// красоты: при `real_ip_recursive on` адрес из ДОВЕРЕННОЙ сети (10/8, 172.16/12,
+// 192.168/16, 127/8) был бы пропущен как «ещё один прокси», nginx откатился бы
+// к адресу контейнера, и все синтетические клиенты молча схлопнулись бы в один.
+export function syntheticClient(index) {
+  return `203.0.113.${1 + (index % 254)}`;
 }

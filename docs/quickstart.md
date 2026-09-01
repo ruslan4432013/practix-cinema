@@ -10,7 +10,7 @@ Compose-файлы лежат в `infra/compose/`, а не в корне, поэ
 cp .env.example .env
 DC="docker compose --env-file .env -f infra/compose/docker-compose.yml --project-directory infra/compose"
 
-# 1. Поднять стек из корня репозитория. Ядро — 12 сервисов; профили добавляются
+# 1. Поднять стек из корня репозитория. Ядро — 28 сервисов; профили добавляются
 #    по одному, всё вместе просит у Docker ≥16 ГБ (см. docs/architecture.md).
 $DC up -d --build
 #   + --profile warehouse       ClickHouse, Keeper, ETL ClickHouse
@@ -54,6 +54,22 @@ $DC exec clickhouse-01 clickhouse-client --user etl --password etl \
       WHERE film_id='$FILM' GROUP BY progress_pct ORDER BY progress_pct"
 # ожидаем бакеты 0,10,20,30,40,50 — ровно до той точки, где зритель ушёл
 
+# 6. Рекомендации. Выдача живёт в ядре, обучение — в профиле warehouse.
+#    Стенд поднимается с пустым ClickHouse, поэтому историю просмотров сначала
+#    генерируем: без взаимодействий обучать нечего.
+$DC exec recsys-trainer python -m practix_recsys_trainer.cli stats
+$DC exec recsys-trainer python -m practix_recsys_trainer.cli generate \
+    --sink clickhouse --users 5000 --seed 42
+$DC exec recsys-trainer python -m practix_recsys_trainer.cli train
+$DC exec recsys-trainer python -m practix_recsys_trainer.cli evaluate --k 10
+
+FILM=$(curl -s -H 'X-Request-Id: c' 'http://localhost/api/v1/films?page_size=1' \
+       | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["uuid"])')
+curl -s "http://localhost/api/v1/recommendations/similar/$FILM?limit=5"
+curl -s "http://localhost/api/v1/recommendations/popular?limit=5"
+# в каждом ответе есть поле source: similar / personal / popular — по нему видно,
+# отдана выдача или сработала деградация
+
 # Миграции Auth и UGC (Alembic) отдельной командой НЕ нужны: их прогоняют
 # одноразовые сервисы auth-migrations и ugc-migrations, и сами сервисы ждут их
 # завершения. Вручную — целями Nx:
@@ -80,6 +96,8 @@ ETL автоматически перенесёт данные из PostgreSQL �
 - Kibana — http://localhost:5601 (профиль `logging`), Elasticsearch логов — http://localhost:9210
 - Панель рассылок — http://localhost:8090/admin/ (профиль `notifications`, вход `admin`/`admin`),
   RabbitMQ — http://localhost:15672, принятые письма — http://localhost:8025
+- Swagger рекомендаций — http://localhost/api/recommendations/openapi,
+  метрики обучения — http://localhost:9102/metrics (профиль `warehouse`)
 - Витрина деградации websocket → long polling → лента — http://localhost:8090/demo/cabinet
   (профиль `notifications`; websocket-шлюз слушает http://localhost:8091)
 
