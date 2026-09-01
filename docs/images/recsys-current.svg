@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 880" width="1300" height="880" role="img">
+  <title>Текущая архитектура кинотеатра Practix: клиент через nginx попадает в каталог, UGC, аналитику и короткие ссылки; все они обращаются к сервису Auth и его Redis; отдельно стоят админка с поисковым конвейером, нотификации и слой наблюдаемости.</title>
+  <style>
+  .bgr { fill: #F6F9F8; }
+  text { font-kerning: normal; }
+  .box { fill: #FFFFFF; stroke: #C4CECB; stroke-width: 1.5; }
+  .box-dim { fill: none; stroke: #C4CECB; stroke-width: 1.5; }
+  .bar { fill: #DFE5E3; stroke: #C4CECB; stroke-width: 1.5; }
+  .new { fill: #F6E9D2; stroke: #A9660A; stroke-width: 2; }
+  .new-o { fill: none; stroke: #A9660A; stroke-width: 1.75; stroke-dasharray: 7 4; }
+  .danger { fill: #F6E1E1; stroke: #9C3838; stroke-width: 1.75; stroke-dasharray: 7 4; }
+  .h { fill: #121A18; font-family: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; font-weight: 600; }
+  .h-acc { fill: #7E4C06; font-family: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif; font-size: 15px; font-weight: 600; }
+  .h-warn { fill: #9C3838; font-family: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif; font-size: 13px; font-weight: 600; }
+  .sub { fill: #37423F; font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; font-size: 10.5px; }
+  .t { fill: #66736F; font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; font-size: 10px; }
+  .t-acc { fill: #7E4C06; font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; font-size: 10px; }
+  .band-label { fill: #66736F; font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; font-size: 11px; letter-spacing: 0.13em; }
+  .badge-r { fill: #A9660A; }
+  .badge-t { fill: #FFFFFF; font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; font-size: 9.5px; font-weight: 700; }
+  .rule { stroke: #C4CECB; stroke-width: 1; }
+  .div { stroke: #DCE3E1; stroke-width: 1; }
+  .arrow { stroke: #66736F; stroke-width: 1.5; fill: none; }
+  .arrow-dash { stroke: #66736F; stroke-width: 1.5; fill: none; stroke-dasharray: 6 4; }
+  .arrow-acc { stroke: #A9660A; stroke-width: 2; fill: none; }
+  .arrow-warn { stroke: #9C3838; stroke-width: 1.75; fill: none; stroke-dasharray: 6 4; }
+  .hd-m { fill: #66736F; }
+  .hd-a { fill: #A9660A; }
+  .hd-w { fill: #9C3838; }
+  </style>
+  <rect class="bgr" x="0" y="0" width="1300" height="880"/>
+
+          <defs>
+            <marker id="c-hd" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto-start-reverse">
+              <polygon points="0,0 10,4 0,8" class="hd-m"></polygon>
+            </marker>
+          </defs>
+
+          <!-- клиент -->
+          <rect x="40" y="28" width="190" height="46" rx="8" class="box"></rect>
+          <text x="60" y="49" class="h">клиент</text>
+          <text x="60" y="65" class="t">браузер, мобильная вкладка</text>
+          <line x1="135" y1="74" x2="135" y2="86" class="arrow" marker-end="url(#c-hd)"></line>
+
+          <!-- nginx -->
+          <rect x="40" y="92" width="1220" height="52" rx="8" class="bar"></rect>
+          <text x="60" y="115" class="h">nginx :80</text>
+          <text x="152" y="115" class="sub">единая точка входа · генерирует X-Request-Id</text>
+          <text x="60" y="133" class="t">маршруты с модификатором ^~ : /api/v1/events, /api/analytics, /api/ugc, /s/ — порядок в файле ничего не решает</text>
+
+          <!-- drops -->
+          <line x1="185" y1="144" x2="185" y2="180" class="arrow" marker-end="url(#c-hd)"></line>
+          <line x1="495" y1="144" x2="495" y2="180" class="arrow" marker-end="url(#c-hd)"></line>
+          <line x1="805" y1="144" x2="805" y2="180" class="arrow" marker-end="url(#c-hd)"></line>
+          <line x1="1115" y1="144" x2="1115" y2="180" class="arrow" marker-end="url(#c-hd)"></line>
+
+          <!-- ряд A -->
+          <rect x="40" y="188" width="290" height="186" rx="8" class="box"></rect>
+          <text x="60" y="214" class="h">Каталог</text>
+          <text x="60" y="232" class="sub">movies-api · 8 воркеров</text>
+          <line x1="60" y1="244" x2="310" y2="244" class="div"></line>
+          <text x="60" y="264" class="t">elasticsearch — индекс фильмов</text>
+          <text x="60" y="282" class="t">redis — кэш ответов (volatile-lru)</text>
+          <text x="60" y="300" class="t">чтение: кэш → хранилище → кэш</text>
+          <text x="60" y="318" class="t">жанры, персоны, полнотекстовый</text>
+          <text x="60" y="336" class="t">поиск</text>
+
+          <rect x="350" y="188" width="290" height="186" rx="8" class="box"></rect>
+          <text x="370" y="214" class="h">UGC</text>
+          <text x="370" y="232" class="sub">ugc-api · 4 воркера</text>
+          <line x1="370" y1="244" x2="620" y2="244" class="div"></line>
+          <text x="370" y="264" class="t">ugc-db — свой инстанс PostgreSQL</text>
+          <text x="370" y="282" class="t">оценки 0..10, закладки, рецензии</text>
+          <text x="370" y="300" class="t">агрегат film_rating.hist[11]</text>
+          <text x="370" y="318" class="t">запись — одна транзакция под</text>
+          <text x="370" y="336" class="t">pg_advisory_xact_lock</text>
+
+          <rect x="660" y="188" width="290" height="186" rx="8" class="box"></rect>
+          <text x="680" y="214" class="h">Аналитика</text>
+          <text x="680" y="232" class="sub">analytics-collector · 4 воркера</text>
+          <line x1="680" y1="244" x2="930" y2="244" class="div"></line>
+          <text x="680" y="264" class="t">Kafka ×3 — RF=3, ISR=2</text>
+          <text x="680" y="282" class="t">redis-ugc — буфер деградации</text>
+          <text x="680" y="300" class="t">etl-clickhouse → ClickHouse 2×2</text>
+          <text x="680" y="318" class="t">+ Keeper ×3, дедуп в три слоя</text>
+          <text x="680" y="336" class="t">ingest никогда не отвечает 5xx</text>
+
+          <rect x="970" y="188" width="290" height="186" rx="8" class="box"></rect>
+          <text x="990" y="214" class="h">Короткие ссылки</text>
+          <text x="990" y="232" class="sub">link-shortener · 4 воркера</text>
+          <line x1="990" y1="244" x2="1240" y2="244" class="div"></line>
+          <text x="990" y="264" class="t">shortener-db — таблица short_link</text>
+          <text x="990" y="282" class="t">код — первичный ключ, base62 ×7</text>
+          <text x="990" y="300" class="t">GET /s/{code} → 302 или 404</text>
+          <text x="990" y="318" class="t">подтверждает почту по ссылке</text>
+          <text x="990" y="336" class="t">из письма</text>
+
+          <!-- стрелки в Auth -->
+          <line x1="185" y1="374" x2="185" y2="422" class="arrow-dash" marker-end="url(#c-hd)"></line>
+          <text x="195" y="404" class="t">проверка прав, с деградацией</text>
+          <line x1="495" y1="374" x2="495" y2="422" class="arrow-dash" marker-end="url(#c-hd)"></line>
+          <text x="505" y="404" class="t">денилист: deny</text>
+          <line x1="805" y1="374" x2="805" y2="422" class="arrow-dash" marker-end="url(#c-hd)"></line>
+          <text x="815" y="404" class="t">денилист: allow</text>
+          <line x1="1115" y1="374" x2="1115" y2="422" class="arrow-dash" marker-end="url(#c-hd)"></line>
+          <text x="1125" y="404" class="t">confirm-email</text>
+
+          <!-- Auth -->
+          <rect x="40" y="430" width="1220" height="104" rx="8" class="bar"></rect>
+          <text x="60" y="456" class="h">Auth</text>
+          <text x="112" y="456" class="sub">единственный владелец персональных данных</text>
+          <line x1="60" y1="466" x2="1240" y2="466" class="div"></line>
+          <text x="60" y="486" class="t">auth-db — пользователи, роли, история входов (RANGE-партиции по auth_date)</text>
+          <text x="60" y="504" class="t">redis — денилист токенов, сессии user:{id}:sessions, rate limit</text>
+          <text x="60" y="522" class="t">роли зашиты в JWT · first_name / last_name живут только здесь · POST /api/v1/users/lookup отдаёт их пачкой</text>
+
+          <!-- стрелки снизу в Auth -->
+          <line x1="340" y1="580" x2="340" y2="542" class="arrow-dash" marker-end="url(#c-hd)"></line>
+          <text x="350" y="562" class="t">проверка прав, с деградацией</text>
+          <line x1="960" y1="580" x2="960" y2="542" class="arrow-dash" marker-end="url(#c-hd)"></line>
+          <text x="970" y="562" class="t">lookup — имя, фамилия, адрес</text>
+
+          <!-- ряд B -->
+          <rect x="40" y="580" width="600" height="164" rx="8" class="box"></rect>
+          <text x="60" y="606" class="h">Админка и поисковый индекс</text>
+          <line x1="60" y1="618" x2="620" y2="618" class="div"></line>
+          <text x="60" y="638" class="t">Django Admin — Python 3.12, вне uv-workspace, свой uv.lock и свой Dockerfile</text>
+          <text x="60" y="656" class="t">theatre-db — фильмы, жанры, персоны; сид из database_dump.sql</text>
+          <text x="60" y="674" class="t">etl-elasticsearch: PostgreSQL → Elasticsearch, инкрементально по времени</text>
+          <text x="60" y="692" class="t">post_save → film.published в нотификации (выключено по умолчанию)</text>
+          <text x="60" y="716" class="t">маршрутизируется nginx: /admin, /api/v1/films внутреннего контента</text>
+
+          <rect x="660" y="580" width="600" height="164" rx="8" class="box"></rect>
+          <text x="680" y="606" class="h">Нотификации</text>
+          <line x1="680" y1="618" x2="1240" y2="618" class="div"></line>
+          <text x="680" y="638" class="t">панель + builder + worker + scheduler (Django, gunicorn) · ws-шлюз (FastAPI)</text>
+          <text x="680" y="656" class="t">notifications-db — кампании, шаблоны, журнал доставки, кабинет</text>
+          <text x="680" y="674" class="t">RabbitMQ — работа, ретраи с TTL и dead-letters; outbox в одной транзакции</text>
+          <text x="680" y="692" class="t">builder ходит в Auth за именем и адресом — в очереди только идентификаторы</text>
+          <text x="680" y="716" class="t">порты 8090 / 8091 — мимо nginx: он резолвит апстримы на старте</text>
+
+          <!-- наблюдаемость -->
+          <rect x="40" y="784" width="1220" height="64" rx="8" class="bar"></rect>
+          <text x="60" y="810" class="h">Наблюдаемость</text>
+          <line x1="60" y1="820" x2="1240" y2="820" class="div"></line>
+          <text x="60" y="838" class="t">Jaeger — трассы · Prometheus + Grafana — метрики · GlitchTip — ошибки · Filebeat → Logstash → Elasticsearch логов → Kibana. Приложения знают только stdout.</text>
+        
+</svg>

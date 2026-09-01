@@ -1,0 +1,49 @@
+[project]
+name = "practix-recsys-trainer"
+version = "1.0.0"
+description = "Офлайн-обучение рекомендаций: датасет, со-встречаемость, ALS, раскладка витрины"
+requires-python = ">=3.13"
+dependencies = [
+    # Ни fastapi, ни uvicorn — как у etl-clickhouse: сервис не обслуживает
+    # запросы. HTTP-порт у него есть, но только под /metrics, и его поднимает
+    # prometheus_client собственным сервером в один поток.
+    "practix-core[otel,sentry]",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    # Та же версия, что у etl-clickhouse: два клиента одного кластера, разошедшиеся
+    # по минорным версиям драйвера, — это отладка, которой можно не заниматься.
+    "clickhouse-connect[async]==1.6.0",
+    "sqlalchemy>=2.0.51",
+    # Синхронный драйвер, а не asyncpg: батч линеен по своей природе, конкурентных
+    # запросов у него нет, и асинхронность добавила бы цикл событий без единого
+    # места, где он что-то ускоряет.
+    "psycopg[binary]>=3.2.0",
+    "redis>=8.0.0",
+    "httpx>=0.28.1",
+    "numpy>=2.1.0",
+    "scipy>=1.14.0",
+    # ADR-007: матричная факторизация как БИБЛИОТЕКА, а не как сервис. Готовый
+    # движок (Gorse) принёс бы своё хранилище и свою модель данных, а диплом
+    # защищается за понимание алгоритма. Библиотеку можно выбросить, не трогая
+    # архитектуру: за швом витрины её никто не видит.
+    "implicit>=0.7.2",
+    "typer>=0.27.0",
+    "prometheus-client>=0.21.0",
+]
+
+[dependency-groups]
+test = [
+    "practix-testing[clickhouse]",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+]
+
+[project.scripts]
+practix-recsys-trainer = "practix_recsys_trainer.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/practix_recsys_trainer"]

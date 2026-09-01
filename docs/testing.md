@@ -26,6 +26,8 @@ npx nx run etl-clickhouse:test-functional
 npx nx run ugc-api:test-functional
 npx nx run notifications:test-functional   # включая сквозной websocket-набор
 npx nx run link-shortener:test-functional
+npx nx run recommendations-api:test-functional
+npx nx run recsys-trainer:test-functional
 ```
 
 Набор `django-admin` идёт на SQLite и **осознанно не проверяет схему `content`,
@@ -70,13 +72,31 @@ Movies API нужен сессионный цикл (у него сессион�
 
 Сценарии k6 лежат в [`loadtests/`](../loadtests/README.md) — по одному на каждую
 публичную ручку: `ingest.js` (коллектор), `movies.js` (Movies API), `auth.js`
-(вход и обновление токенов). Пороги (`thresholds`) заданы в самих сценариях,
+(вход и обновление токенов), `recommendations.js` (выдача рекомендаций). Пороги (`thresholds`) заданы в самих сценариях,
 поэтому k6 выходит с ненулевым кодом при их нарушении и годится как шаг CI.
 
 ```bash
 docker run --rm --network host -v "$PWD/loadtests:/scripts" \
     grafana/k6:0.55.0 run /scripts/ingest.js
 ```
+
+У `recommendations.js` порог тоже взят прямо из ТЗ (раздел 5.1): p95 < 200 мс,
+p99 < 300 мс и ни одного 5xx. Профиль там — `constant-arrival-rate`, а не
+`ramping-vus`: раздел 4 ТЗ считает нагрузку в запросах в секунду, а обстрел «на
+максимум» меряет не сервис, а то, где раньше кончится терпение у прокси.
+
+Сценарий идёт на **проектные 100 RPS** из раздела 4 и снимает их через nginx,
+**не выключая лимитер**: итерации раскладываются по восьми синтетическим
+адресам через `X-Forwarded-For` (nginx уже доверяет прокси из сети compose), и
+на адрес приходится 12,5 r/s против зоны `recs_read` в 50 r/s. Одним адресом
+цифра недостижима в принципе, и снятый на 40 RPS p95 — это p95 на 40 RPS.
+
+Выше — пороги. **Снятые числа** (p95 43,9 мс, p99 47,8 мс, ноль 5xx на 6 000
+запросов, батч обучения 19,5 с) с условиями замера и оговорками —
+[`docs/recommendations.md`](recommendations.md#замеры-slo).
+Что зона при этом жива, доказывает отдельный короткий сценарий
+`recs-limiter.js`: перебор с одного адреса обязан упереться в 429 и не дать ни
+одного 5xx. Подробности и ловушки — в [`loadtests/README.md`](../loadtests/README.md).
 
 Ключевой порог у ingest — **ноль 5xx**: это прямая проверка основного
 инварианта коллектора (приём события не отвечает ошибкой сервера даже при

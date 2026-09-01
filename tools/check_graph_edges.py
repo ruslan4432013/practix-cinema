@@ -38,6 +38,11 @@ EXPECTED: dict[str, set[str]] = {
     # (450 строк обвязки) стала бы крупнейшим дублированием в репозитории.
     'notifications-ws': {'platform-core'},
     'link-shortener': {'platform-core', 'testing'},
+    'recommendations-api': {'platform-core', 'testing'},
+    # Ребро на testing есть и у батча: его функциональный набор ждёт готовности
+    # ClickHouse скриптом practix_testing.utils.wait_for_clickhouse, а не
+    # собственным циклом опроса — третьей копией того же ожидания.
+    'recsys-trainer': {'platform-core', 'testing'},
     'etl-elasticsearch': {'platform-core', 'search-schema'},
     'analytics-contracts': set(),
     'platform-core': set(),

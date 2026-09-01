@@ -1,0 +1,48 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "recommendations-api",
+  "projectType": "application",
+  "sourceRoot": "apps/recommendations-api/src",
+  "tags": [
+    "lang:python",
+    "scope:recs",
+    "type:app"
+  ],
+  "targets": {
+    "lint": {},
+    "test": {
+      "options": {
+        "command": "uv run --package practix-recommendations-api --group test pytest apps/recommendations-api/tests/unit -v"
+      }
+    },
+    "docker": {
+      "options": {
+        "command": "docker buildx build -f infra/docker/python-service.Dockerfile --target recommendations-api --build-arg PACKAGE=practix-recommendations-api --load -t practix/recommendations-api:local ."
+      }
+    },
+    "test-functional": {
+      "inputs": [
+        "python",
+        "pythonTests",
+        "^python",
+        "sharedGlobals",
+        "{workspaceRoot}/infra/compose/**",
+        "{workspaceRoot}/infra/docker/**"
+      ],
+      "options": {
+        "commands": [
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose run --rm --build recommendations-api-tests",
+          "docker compose -f infra/compose/docker-compose.test.yml --project-directory infra/compose down -v"
+        ]
+      }
+    },
+    "migrate": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "cwd": "{workspaceRoot}",
+        "command": "uv run --package practix-recommendations-api alembic -c apps/recommendations-api/alembic.ini upgrade head"
+      }
+    }
+  }
+}

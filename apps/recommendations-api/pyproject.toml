@@ -1,0 +1,38 @@
+[project]
+name = "practix-recommendations-api"
+version = "1.0.0"
+description = "Онлайн-выдача рекомендаций: похожие фильмы, персональные подборки, популярное"
+requires-python = ">=3.13"
+dependencies = [
+    # Экстра `jwt` — персональная выдача привязана к user_id из проверенного
+    # токена; `httpx` — только инструментация OpenTelemetry, сам клиент
+    # объявляется ниже (им ходит catalog_client за карточками в Movies API).
+    "practix-core[asgi,fastapi,otel,jwt,httpx,sentry]",
+    "fastapi>=0.137.1",
+    "uvicorn>=0.49.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "sqlalchemy[asyncio]>=2.0.51",
+    "asyncpg>=0.31.0",
+    "alembic>=1.18.5",
+    "redis>=8.0.0",
+    "async-fastapi-jwt-auth>=0.6.6",
+    # Возраст витрины обязан быть виден в метриках, а не только в логах:
+    # устаревшая модель — это инцидент, а не тишина.
+    "prometheus-client>=0.21.0",
+]
+
+[dependency-groups]
+test = [
+    "practix-testing",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/practix_recommendations_api"]

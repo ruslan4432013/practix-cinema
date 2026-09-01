@@ -108,6 +108,7 @@ ignore = [
 "tools/*.py" = ["T20"]
 # В CLI печать — это и есть пользовательский интерфейс.
 "apps/auth/src/practix_auth/cli.py" = ["T20"]
+"apps/recsys-trainer/src/practix_recsys_trainer/cli.py" = ["T20"]
 # Стенд исследования хранилища: печать в stdout — его интерфейс, как у seed_db.py
 # и tools/. Правка sys.path перед импортом lib/ закрыта точечными noqa на самих
 # импортах: стенд живёт вне uv-workspace и настоящим пакетом не является.
@@ -143,6 +144,8 @@ known-first-party = [
     "practix_notifications",
     "practix_notifications_ws",
     "practix_link_shortener",
+    "practix_recommendations_api",
+    "practix_recsys_trainer",
 ]
 
 [tool.ruff.format]

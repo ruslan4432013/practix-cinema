@@ -15,6 +15,12 @@ practix-cinema/
 │   ├── analytics-collector/    practix-analytics-collector
 │   ├── etl-clickhouse/         practix-etl-clickhouse
 │   ├── etl-elasticsearch/      practix-etl-elasticsearch  ← было etl/
+│   ├── ugc-api/                practix-ugc-api
+│   ├── notifications/          practix-notifications      Django на 3.13, внутри workspace
+│   ├── notifications-ws/       practix-notifications-ws
+│   ├── link-shortener/         practix-link-shortener
+│   ├── recommendations-api/    practix-recommendations-api  выдача + схема витрины
+│   ├── recsys-trainer/         practix-recsys-trainer       офлайн-обучение
 │   └── django-admin/           вне workspace: Python 3.12, свой uv.lock
 ├── libs/                       общий код (только внутреннее потребление)
 │   ├── platform-core/          practix-core        логи, request-id, трассировка,
@@ -24,7 +30,7 @@ practix-cinema/
 │   └── testing/                practix-testing     фикстуры и скрипты ожидания
 ├── infra/
 │   ├── compose/                docker-compose.yml + .test.yml
-│   ├── docker/                 ОДИН Dockerfile на все 5 Python-сервисов
+│   ├── docker/                 ОДИН Dockerfile на все 11 Python-сервисов
 │   ├── nginx/  monitoring/  clickhouse/  elk/
 └── tools/                      проверки целостности для CI
 ```
@@ -295,7 +301,15 @@ SQLite, а `db_table = 'content"."genre'` — это инъекция схемы
 Было пять Dockerfile'ов, из которых четыре — один шаблон с подставленными
 значениями, с побайтово одинаковой четырёхстрочной шапкой; ни один не использовал
 multi-stage, кеш BuildKit или общий слой. Стало: `infra/docker/python-service.Dockerfile`,
-стадия `deps` общая для всех шести `--target` (шестым добавился `ugc-api`).
+стадия `deps` общая для всех одиннадцати `--target` (шестым был добавлен `ugc-api`,
+последними — `recommendations-api` и `recsys-trainer`).
+
+**Один таргет из одиннадцати ставит системный пакет** — `recsys-trainer` и
+`libgomp1`: `implicit` собран с OpenMP. Это единственное отступление от правила
+«обходимся колёсами», и держать его пришлось на живом стенде: без библиотеки
+колесо ставится, образ собирается, а ALS падает в рантайме внутри `except`,
+который честно публикует витрину без персональной выдачи. Отказ выглядел бы как
+здоровье.
 
 Общий базовый ОБРАЗ не используется намеренно: BuildKit и так переиспользует
 стадию между таргетами в одной сборке, а отдельный образ пришлось бы публиковать
@@ -327,11 +341,12 @@ multi-stage, кеш BuildKit или общий слой. Стало: `infra/dock
 образ принадлежит (`auth`), а `auth-migrations` переиспользует тег. Сам тег
 переименован: `ugc/auth:local` был просто неверным — Auth не UGC-сервис.
 
-Переиспользование тегов (4 образа на 8 сервисов тестового стенда) сохранено
-сознательно: именно оно гарантирует, что `ugc-tests` прогоняет те же байты, что
-работают в `analytics-collector`.
+Переиспользование тегов (11 образов на 24 объявления сервисов тестового стенда)
+сохранено сознательно: именно оно гарантирует, что `notifications-tests` прогоняет
+те же байты, что работают в `notifications-worker`, а `etl-tests` — те же, что
+`etl-clickhouse`.
 
-Восьмой сервис (`notifications-ws`) не дал ни одного нового клона, и два места,
+Websocket-шлюз (`notifications-ws`) не дал ни одного нового клона, и два места,
 где он мог их дать, обойдены осознанно.
 
 **Обвязка наблюдаемости** у FastAPI-сервисов разложена по трём файлам
@@ -352,19 +367,28 @@ FastAPI-шный, поэтому `practix_core.jwt` подошла ему как
 
 ## Профили compose
 
-Без профилей `docker compose up` поднимал бы все 41 сервис, и стенду
+Без профилей `docker compose up` поднимал бы все 58 сервисов, и стенду
 требовалось бы ≥16 ГБ памяти Docker — даже когда правишь только Movies API.
 
 ```bash
-docker compose ... up -d                                                # ядро, 21
-docker compose ... --profile warehouse up -d                            # +ClickHouse/Keeper/ETL → 30
-docker compose ... --profile observability up -d                        # +Prometheus/Grafana/Kafka UI/GlitchTip → 27
-docker compose ... --profile logging up -d                              # +Elasticsearch(логи)/Logstash/Kibana/Filebeat → 26
-docker compose ... --profile warehouse --profile observability --profile logging up -d   # всё, 41
+docker compose ... up -d                                                # ядро, 28
+docker compose ... --profile warehouse up -d                            # +ClickHouse/Keeper/ETL/обучение рекомендаций → 38
+docker compose ... --profile observability up -d                        # +Prometheus/Grafana/Kafka UI/GlitchTip → 34
+docker compose ... --profile logging up -d                              # +Elasticsearch(логи)/Logstash/Kibana/Filebeat → 33
+docker compose ... --profile notifications up -d                        # +панель/сборщик/отправитель/планировщик/шлюз/RabbitMQ/Mailpit → 37
+docker compose ... --profile warehouse --profile observability --profile logging --profile notifications up -d   # всё, 58
 ```
 
 В профиль вынесено самое тяжёлое: 4 узла ClickHouse и 3 Keeper — это и есть
 основная часть тех ≥12 ГБ; ELK добавляет к ним ещё около 2 ГБ.
+
+**Рекомендации разрезаны профилем ровно по шву витрины.** Обучение
+(`recsys-trainer`) сидит в `warehouse` — там же, где ClickHouse, из которого оно
+читает просмотры: нет ClickHouse, нечему и учиться, и отдельный третий профиль
+пришлось бы не забыть повторить на `down -v`. Выдача (`recommendations-api`)
+остаётся в ядре по причине из следующего абзаца — её маршрутизирует nginx. Без
+профиля витрина просто пуста: выдача отдаёт популярное, а когда нет и его —
+`200` с пустым списком, и страница фильма цела.
 
 **Логи хранит ОТДЕЛЬНЫЙ Elasticsearch**, а не соседний индекс в поисковом.
 Причина не в объёме, а в связности отказов: лог растёт непрерывно, и первый же
@@ -382,6 +406,11 @@ docker compose ... --profile warehouse --profile observability --profile logging
 теряет keepalive к апстриму — для ingest-ручки (самый горячий маршрут) это дороже,
 чем удобство локального запуска. Ухудшать продовую конфигурацию ради dev-удобства
 неправильно, поэтому профиль сузили до хранилища.
+
+По этому же правилу в ядре остались `ugc-api`, `link-shortener` и
+`recommendations-api` со своими базами: у каждого есть маршрут в nginx
+(`/api/v1/recommendations` и `/api/recommendations` — зона `recs_read`, 50 r/s),
+а значит и `upstream`, который резолвится при старте.
 
 `jaeger` тоже в ядре: приложения пишут трассировку по умолчанию, и без него
 экспортёр молотил бы в пустоту.
@@ -406,24 +435,37 @@ docker compose ... --profile warehouse --profile observability --profile logging
 `test` (`UV_GROUPS=--group test`), а скрипты ожидания вызываются как
 `python -m practix_testing.utils.wait_for_kafka`.
 
-### `pytest.ini`: шесть файлов и одна мина
+**Наборов рекомендаций два, и мигратор у них берётся из образа ВЫДАЧИ.**
+`recommendations-api:test-functional` идёт против живых `recs-db` и `redis-recs`,
+`recsys-trainer:test-functional` — против той же витрины, но контейнер
+`recs-migrations-test` в обоих случаях собран из таргета `recommendations-api`, а
+не батча. Причина не в стиле: миграции витрины живут в пакете
+`practix-recommendations-api`, а в образе батча установлен только
+`practix-recsys-trainer` — там нет ни alembic, ни самих версий. Это прямое
+следствие того, что схемой витрины владеет выдача, хотя пишет в неё батч.
 
-Область event loop РАЗНАЯ у наборов, и это требование, а не недосмотр:
+### `pytest.ini`: по конфигу на набор и одна мина
+
+Файлов столько же, сколько наборов: по одному на каждый
+`apps/*/tests/{unit,functional}`, плюс `libs/platform-core/` и
+`apps/django-admin/` (`find apps libs -name pytest.ini`). Число растёт с каждым
+сервисом, и это не разрастание, а следствие: область event loop РАЗНАЯ у
+наборов, и это требование, а не недосмотр:
 
 * набор movies-api держит сессионные фикстуры (`es_client`, `redis_client`,
   `http_session`) и требует `asyncio_default_fixture_loop_scope = session`
-  **вместе с** `asyncio_default_test_loop_scope = session`;
-* наборы auth/ugc/etl пересоздают состояние на каждый тест (движок SQLAlchemy,
-  клиент Redis, продюсер Kafka) и обязаны остаться function-scoped.
+  **вместе с** `asyncio_default_test_loop_scope = session`. Он единственный такой;
+* все остальные асинхронные наборы пересоздают состояние на каждый тест (движок
+  SQLAlchemy, клиент Redis, продюсер Kafka) и обязаны остаться function-scoped.
 
 Раньше это достигалось наследованием rootdir: родительский
-`tests/functional/pytest.ini` включал сессионные области, три сиблинга их
+`tests/functional/pytest.ini` включал сессионные области, сиблинги их
 переопределяли. **Наследования больше нет** — наборы в разных приложениях, общего
 родителя не существует, каждый конфиг единственный. Строго понятнее, но означает:
 **не добавляй `[tool.pytest.ini_options]` в корневой `pyproject.toml`** — он снова
-станет родителем и молча вернёт сессионный цикл, сломав три набора с «got Future
-attached to a different loop». Предупреждение продублировано в каждом из трёх
-файлов.
+станет родителем и молча вернёт сессионный цикл, сломав все function-scoped
+наборы с «got Future attached to a different loop». Предупреждение продублировано
+в самих конфигах — там, где сессионный цикл сломал бы набор.
 
 ### Наборы по-прежнему запускаются по одному
 
@@ -453,7 +495,7 @@ GitHub свой демон.
 стоит безусловный прогон по корневому конфигу; он занимает секунды на 31 файле.
 
 Матрица версий Python в job `checks` — `3.13` и `3.14`, то есть нижняя и верхняя
-границы диапазона. Нижняя закреплена `requires-python = ">=3.13"` у всех 11
+границы диапазона. Нижняя закреплена `requires-python = ">=3.13"` у всех 15
 членов workspace (uv workspace делит одно разрешение зависимостей, и планка у
 него общая); верхняя ловит поломки от свежего интерпретатора до того, как
 переезд станет обязательным. Ниже 3.13 матрица не идёт: `class
