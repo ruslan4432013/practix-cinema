@@ -104,7 +104,8 @@ npx nx run recommendations-api:test-functional   # против живых recs-
 
 # SLO на проектных 100 RPS (p95 < 200 мс, p99 < 300 мс, 5xx нет).
 # Снятые числа — docs/recommendations.md#замеры-slo: p95 43,9 мс, p99 47,8 мс.
-# FILM_IDS обязателен: без него замер идёт по одному фильму, то есть по кэшу.
+# FILM_IDS обязателен: без него сценарий не стартует — идентификаторы должны быть
+# настоящими, иначе выдача отвечает 404 и прогон падает по порогу, а не по SLO.
 FILMS=$(docker compose --env-file .env -f infra/compose/docker-compose.yml \
     --project-directory infra/compose exec -T recs-db psql -U postgres -d recs_database \
     -t -A -c "SELECT string_agg(film_id::text, ',') FROM (SELECT DISTINCT film_id FROM similar_item LIMIT 200) s")

@@ -37,6 +37,11 @@ def test_pointer_is_written_after_the_lists_not_before(shelf_engine, seed_views)
     result = run_training(run_key='test:warmup', with_metrics=False)
 
     assert client.get(POINTER_KEY) == str(result.version)
+    # Исход прогрева обязан быть виден в результате прогона, а не только в
+    # логе: прогон, у которого кэш не сложился, завершается успешно и красит
+    # все метрики свежести в зелёное (F0.4).
+    assert result.warmed is True
+    assert result.stats['warmed'] is True
     popular = client.get(f'recs:v{result.version}:popular')
     assert popular is not None
     assert json.loads(popular)

@@ -94,6 +94,15 @@ def fetch_interactions(client: Client, *, since: datetime.datetime | None = None
     времени, а не случайно, иначе модель обучится на будущем и метрики качества
     окажутся завышенными — ровно та ошибка, ради недопущения которой E5 стоит
     в плане до E6.
+
+    СОРТИРОВКА УБЫВАЮЩАЯ, потому что ниже стоит ``LIMIT``: если предохранитель
+    ``RECS_TRAINER_MAX_INTERACTIONS`` сработает, отрезать надо хвост истории, а
+    не её голову. По возрастанию в обучение попадал бы самый старый срез, а
+    свежие интересы отбрасывались — и это была бы тихая поломка: сплит по
+    времени назвал бы «будущим» события, давно ушедшие в прошлое, метрики E5
+    остались бы зелёными, измеряя не то. Вторичный ключ ``user_id, film_id``
+    даёт воспроизводимость: при совпадающих ``last_seen`` (на синтетике это
+    норма) без него граница отсечения зависела бы от порядка выдачи ClickHouse.
     """
     where = ['user_id IS NOT NULL']
     params: dict[str, object] = {
@@ -113,7 +122,7 @@ def fetch_interactions(client: Client, *, since: datetime.datetime | None = None
         WHERE {' AND '.join(where)}
         GROUP BY user_id, film_id
         HAVING weight >= %(min_completion)s
-        ORDER BY last_seen
+        ORDER BY last_seen DESC, user_id, film_id
         LIMIT %(limit)s
     """
     rows = client.query(query, parameters=params).result_rows

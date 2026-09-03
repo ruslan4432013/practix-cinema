@@ -41,6 +41,12 @@ class TrainingResult:
     stats: dict = field(default_factory=dict)
     skipped: bool = False
     reports: list[quality.QualityReport] = field(default_factory=list)
+    # Прогрев горячего слоя — единственный шаг, чья неудача НЕ делает прогон
+    # неудачным (витрина уже закоммичена), и ровно поэтому его исход обязан
+    # доехать до вызывающей стороны отдельным полем. Пока он оставался только
+    # строкой в логе, непрогретый кэш был неотличим от прогретого по всему, на
+    # что кто-либо смотрит.
+    warmed: bool = False
 
 
 def build_run_key(moment: datetime.datetime | None = None) -> str:
@@ -226,14 +232,28 @@ def _publish(
     # Прогрев ПОСЛЕ коммита. Внутри транзакции он разложил бы в кэш версию,
     # которой при откате никогда не существовало бы, и выдача пошла бы за
     # номером версии, отсутствующим в базе.
-    warmup.warm(
+    warmed = warmup.warm(
         version,
         popular=popular_rows,
         similar=_top_similar_for_warmup(similar_rows),
     )
+    # В stats, а не в shelf_version: та же причина, что у pruned_versions выше —
+    # обе величины становятся известны после того, как статистика версии уже
+    # закоммичена. Догонять их вторым UPDATE тут было бы ещё и неправдой:
+    # «прогрето» стареет сразу же (ключи живут по TTL, Redis перезапускают), а
+    # поле статистики, которое врёт через сутки, хуже отсутствующего. Живое
+    # состояние горячего слоя отвечает warmup.pointer_version(); здесь —
+    # результат ЭТОГО прогона, чтобы cli train печатал его вместе с остальным.
+    stats['warmed'] = warmed
 
     return TrainingResult(
-        version=version, run_key=run_key, models=models, rows=stats['rows'], stats=stats, reports=reports
+        version=version,
+        run_key=run_key,
+        models=models,
+        rows=stats['rows'],
+        stats=stats,
+        reports=reports,
+        warmed=warmed,
     )
 
 

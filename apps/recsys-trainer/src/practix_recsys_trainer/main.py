@@ -30,7 +30,7 @@ from practix_core.tracing import init_tracer_provider
 from practix_recsys_trainer.core.config import settings
 from practix_recsys_trainer.core.observability import configure_logging
 from practix_recsys_trainer.pipeline import run_training
-from practix_recsys_trainer.shelf import writer
+from practix_recsys_trainer.shelf import warmup, writer
 
 LOGGING = configure_logging()
 logger = logging.getLogger(__name__)
@@ -50,6 +50,17 @@ shelf_age = Gauge('recs_shelf_age_seconds', 'Возраст актуальной
 shelf_version = Gauge('recs_shelf_version', 'Номер актуальной версии витрины')
 shelf_rows = Gauge('recs_shelf_rows', 'Строк в витрине по видам списков', ['kind'])
 catalog_coverage = Gauge('recs_catalog_coverage', 'Доля каталога с непустым блоком похожих')
+# Неудачный прогрев не делает прогон неудачным — витрина уже закоммичена, — и
+# поэтому в recs_train_runs_total он попадает как success. Отдельный счётчик
+# нужен именно за этим: иначе единственным следом остаётся строка в логе, а
+# логи не читают, пока ничего не сломалось (F0.4).
+warmup_failures = Counter('recs_warmup_failures_total', 'Прогоны, после которых горячий слой не прогрет')
+# Состояние, а не событие: счётчик отвечает «сколько раз не сложилось», гейдж —
+# «холодно ли ПРЯМО СЕЙЧАС». Второе не выводится из первого, потому что горячий
+# слой можно потерять и без единого неудачного прогрева (Redis перезапустили,
+# базу вычистили руками), а неудачный прогрев бывает ложным: потерянный ответ
+# на EXEC даёт False при легших данных.
+shelf_warm = Gauge('recs_shelf_warm', 'Обслуживает ли горячий слой актуальную версию витрины')
 
 
 def _refresh_shelf_metrics() -> None:
@@ -76,6 +87,11 @@ def _refresh_shelf_metrics() -> None:
         return
     shelf_version.set(version)
     shelf_age.set(max(0.0, time.time() - finished_at.timestamp()))
+    # Указатель читается из Redis, а не берётся из результата прогона, по той
+    # же причине, по которой возраст берётся из PostgreSQL: гейдж, заполняемый
+    # только собственным прогоном, показывал бы «прогрето» ещё сутки после
+    # того, как горячий слой опустел мимо трейнера.
+    shelf_warm.set(1.0 if warmup.pointer_version() == version else 0.0)
     catalog_coverage.set(float(stats.get('catalog_coverage', 0.0)))
     for kind, count in (stats.get('rows') or {}).items():
         shelf_rows.labels(kind=kind).set(count)
@@ -90,6 +106,12 @@ def _run_once() -> None:
         return
 
     train_runs.labels(outcome='success').inc()
+    if not result.warmed:
+        # Прогон успешен: версия опубликована и отвечает правильными данными,
+        # просто из PostgreSQL. Это про наблюдаемость, а не про корректность,
+        # поэтому счётчик, а не outcome='failure' — иначе RecsTrainingFailing
+        # звал бы чинить обучение, которое отработало.
+        warmup_failures.inc()
     # Гейджи витрины заполняет _refresh_shelf_metrics — из самой витрины, а не
     # из результата этого прогона. Два источника у одной метрики означали бы,
     # что её значение зависит от того, кто обновил её последним.
