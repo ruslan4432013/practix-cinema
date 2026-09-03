@@ -212,6 +212,12 @@ FROM runtime AS recommendations-api
 # упирается он в сеть, а не в процессор: четырёх воркеров хватает с
 # десятикратным запасом против плановых 100 RPS (раздел 6 ТЗ).
 #
+# ЧИСЛО ВОРКЕРОВ — МНОЖИТЕЛЬ ПУЛА СОЕДИНЕНИЙ. Пул SQLAlchemy принадлежит
+# процессу, поэтому recs-db видит 4 × (RECS_DB_POOL_SIZE + RECS_DB_MAX_OVERFLOW).
+# Менять --workers, не пересчитав пул против max_connections recs-db, нельзя:
+# арифметика записана у самой базы в infra/compose/docker-compose.yml, а её
+# нарушение ловит apps/recommendations-api/tests/unit/test_connection_budget.py.
+#
 # Метрики нескольких воркеров складываются в mmap-файлы общего каталога — иначе
 # скрейп попадал бы в случайный воркер и показывал четверть трафика.
 ENV PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc

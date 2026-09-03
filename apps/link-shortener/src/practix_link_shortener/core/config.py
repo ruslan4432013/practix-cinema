@@ -40,8 +40,22 @@ class Settings(BaseSettings):
     SHORTENER_POSTGRES_HOST: str = '127.0.0.1'
     SHORTENER_POSTGRES_PORT: int = 5432
     SHORTENER_DB_ECHO: bool = False
-    SHORTENER_DB_POOL_SIZE: int = 10
-    SHORTENER_DB_MAX_OVERFLOW: int = 20
+    # ПОТОЛОК ПУЛА СЧИТАЕТСЯ НА КОНТЕЙНЕР, А НЕ НА ПРОЦЕСС. Пул принадлежит
+    # воркеру uvicorn, а воркеров четыре (см. CMD таргета link-shortener в
+    # infra/docker/python-service.Dockerfile), поэтому база видит вчетверо
+    # больше соединений, чем написано здесь: 4 × (POOL_SIZE + MAX_OVERFLOW).
+    # Прежние 10 + 20 давали 120 при умолчании postgres в 100. Отказ пришёл бы
+    # ровно в пик — сразу после массовой рассылки, когда по ссылкам ходят все
+    # сразу, — и человек прочитал бы его как «ссылка из письма не работает».
+    #
+    # 5 + 5 держат бюджет shortener-db с запасом (арифметика — в комментарии к
+    # shortener-db в infra/compose/docker-compose.yml, а её нарушение ловит
+    # apps/link-shortener/tests/unit/test_connection_budget.py):
+    #   сервис 4 × 10 = 40, уборка ≤ 10, миграции ≤ 2 — против 97 доступных.
+    # Про запас: горячий путь `/s/{code}` — одно чтение по первичному ключу и
+    # инкремент счётчика в фоне, то есть доли миллисекунды на соединение.
+    SHORTENER_DB_POOL_SIZE: int = 5
+    SHORTENER_DB_MAX_OVERFLOW: int = 5
 
     # --- Форма самой ссылки ---
     # База, которую сервис отдаёт вызывающему. Это ВНЕШНИЙ адрес (через nginx), а
